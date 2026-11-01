@@ -354,8 +354,8 @@ def call_llm(messages):
             # và không để phần suy nghĩ ăn hết max_tokens -> tắt suy luận.
             # (Khi tắt thì không cần lưu/gửi lại reasoning_details như ví dụ trong tài liệu.)
             "reasoning": {"enabled": False},
-            "temperature": 0.9 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
-            "max_tokens": 1000,
+            "temperature": 0.8 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
+            "max_tokens": 2000,
             "stream": False,
         }
         resp = post_openrouter(payload)
