@@ -1,0 +1,5 @@
+# Không bao giờ đưa các file này lên GitHub
+PRIVATE_*
+*.log
+chat_history.json
+__pycache__/
