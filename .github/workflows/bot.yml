@@ -1,4 +1,4 @@
-name: Linh Bot
+name: Linh Voice Bot
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -11,7 +11,7 @@ on:
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
 # nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-bot
+  group: linh-voice-bot
   cancel-in-progress: false
 
 permissions:
@@ -27,13 +27,28 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
+      # MỘT khóa OpenRouter dùng cho cả chat (Xing4.0) lẫn giọng nói (Fish Audio). KHÔNG còn cần DEEPSEEK_API_KEY.
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}   # Tùy chọn: để trống thì dùng inclusionai/ling-3.0-flash-vl
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
+
+      # --- Chat (không nhạy cảm nên để thẳng ở đây) ---
+      LLM_MODEL: "xingchen-agi/xing4.0-29b-a4b:free"
+      LLM_REASONING: "1"          # "1" = bật suy nghĩ (chất lượng hơn nhưng chậm, có thể vài chục giây/lượt); "0" = tắt cho nhanh
+      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (như mẫu OpenRouter)
+      LLM_MAX_TOKENS: "4096"      # Token suy nghĩ tính chung vào mức này; đặt thấp quá thì model nghĩ xong là hết token
+
+      # --- Giọng nói ---
+      TTS_MODEL: "fish-audio/s2.1-pro-free:free"
+      TTS_VOICE: ""               # ID giọng Fish Audio (dãy hex 32 ký tự). Để trống = giọng mặc định của model
+      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc, vd "Giọng nữ trẻ, ngọt ngào, nhẹ nhàng". Để trống = không gửi
+      SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
+      # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
+      # STATE_FILE: "state_xing.json"        # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung state.json của bot cũ
+
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
@@ -51,6 +66,11 @@ jobs:
 
       - name: Cài thư viện
         run: pip install -r requirements.txt
+
+      # Fish Audio trả mp3; bot dùng ffmpeg đổi sang ogg/opus để Telegram hiện thành tin nhắn thoại (có sóng âm).
+      # Thiếu ffmpeg thì bot vẫn chạy và gửi thẳng mp3. Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
+      - name: Cài ffmpeg
+        run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
       - name: Chạy bot
         id: bot
