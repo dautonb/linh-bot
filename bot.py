@@ -118,8 +118,8 @@ STATE_FILE = env("STATE_FILE", "state.json")
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
-MAX_STORED_MESSAGES = 60     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
+MEMORY_WINDOW = 50           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
+MAX_STORED_MESSAGES = 60000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
 RATE_LIMIT_DELAY = 25        # Giây chờ khi bị OpenRouter báo 429 (giới hạn free tính theo phút)
@@ -127,9 +127,9 @@ MAX_RETRY_PER_UPDATE = 3     # Một tin nhắn lỗi tối đa 3 lần thì b�
 
 # --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
 PROACTIVE_ENABLED = True
-PROACTIVE_MIN_IDLE = 2 * 3600
-PROACTIVE_MAX_IDLE = 3 * 3600
-MAX_UNANSWERED_PROACTIVE = 2     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
+PROACTIVE_MIN_IDLE = 1 * 1800
+PROACTIVE_MAX_IDLE = 1 * 3600
+MAX_UNANSWERED_PROACTIVE = 20000     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
 QUIET_START_HOUR = 0             # Không nhắn trước từ 0h...
 QUIET_END_HOUR = 7               # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
