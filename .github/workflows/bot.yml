@@ -40,6 +40,9 @@ jobs:
       LLM_REASONING: "1"          # "1" = bật suy nghĩ (chất lượng hơn nhưng chậm, có thể vài chục giây/lượt); "0" = tắt cho nhanh
       KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (như mẫu OpenRouter)
       LLM_MAX_TOKENS: "4096"      # Token suy nghĩ tính chung vào mức này; đặt thấp quá thì model nghĩ xong là hết token
+      # Model dự phòng, cách nhau bằng dấu phẩy: khi Xing bị 429/lỗi thì OpenRouter tự chuyển sang model kế tiếp.
+      # CHỈ ghi model có đuôi ":free", nếu không sẽ bị tính tiền. Để trống = không dự phòng.
+      LLM_FALLBACK_MODELS: ""
 
       # --- Giọng nói ---
       TTS_MODEL: "fish-audio/s2.1-pro-free:free"
