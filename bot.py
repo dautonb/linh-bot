@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-bot.py - Linh Voice Bot (bản Xing + Fish) chạy trên GitHub Actions (Long Polling).
+bot.py - Linh Voice Bot chạy trên GitHub Actions (Long Polling).
 
-Bản VOICE: Xing4.0 29B A4B viết câu trả lời -> Fish Audio S2.1 Pro đọc thành giọng nói (mp3)
--> đổi sang ogg/opus bằng ffmpeg -> gửi vào Telegram bằng sendVoice.
-CẢ HAI model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
-TTS hoặc gửi voice lỗi thì tự gửi chữ, bot không bao giờ im lặng.
+Bản VOICE (Dots): Dots3-Note Preview (qua OpenRouter) viết câu trả lời -> HeyGen Voice Turbo (cũng qua OpenRouter)
+đọc thành giọng nói -> đổi PCM sang ogg/opus bằng ffmpeg -> gửi vào Telegram bằng sendVoice.
+Cả LLM lẫn giọng nói dùng chung MỘT khóa OPENROUTER_API_KEY.
+LLM lỗi thì tự chuyển sang model free dự phòng khác trên OpenRouter; TTS hoặc gửi voice lỗi thì tự gửi chữ,
+bot không bao giờ im lặng.
 
 Khác bản chạy trên laptop:
 - Mọi khóa bí mật và nội dung nhân vật đọc từ GitHub Secrets (repo public không lộ gì).
@@ -26,7 +27,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 import unicodedata
 from collections import Counter
@@ -45,41 +45,42 @@ def env(name, default=""):
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 CHAT_ID = env("CHAT_ID")
-OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")  # MỘT khóa OpenRouter dùng cho cả chat (Xing) lẫn giọng nói (Fish)
+OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")  # Một khóa OpenRouter dùng cho cả LLM (Dots3-Note) lẫn TTS (HeyGen)
 STATE_REPO = env("STATE_REPO")                  # Dạng "ten-github/linh-bot-data" (repo RIÊNG TƯ)
 STATE_REPO_TOKEN = env("STATE_REPO_TOKEN")      # Token quyền Contents: Read and write cho repo đó
 
 RUN_SECONDS = int(env("RUN_SECONDS", "20400"))  # Thời gian chạy mỗi lượt (5h40m < giới hạn 6h)
 TZ_OFFSET_HOURS = float(env("TZ_OFFSET_HOURS", "7"))  # Múi giờ để tính giờ yên lặng (VN = +7)
 
-# --- Chat (LLM) ---
-LLM_MODEL = env("LLM_MODEL", "xingchen-agi/xing4.0-29b-a4b:free")
-# Xing4.0 BẬT sẵn chế độ suy nghĩ (reasoning). "1" = bật như mẫu của OpenRouter (trả lời chất lượng hơn nhưng chậm hơn:
-# model chạy khoảng 46 token/giây nên mỗi lượt suy nghĩ có thể tốn vài chục giây). "0" = tắt hẳn cho nhanh.
-LLM_REASONING = env("LLM_REASONING", "1") == "1"
-# "1" = lưu reasoning_details của vài câu trả lời gần nhất và gửi lại đúng nguyên bản ở lượt sau (như mẫu của OpenRouter).
-KEEP_REASONING = env("KEEP_REASONING", "1") == "1"
-KEEP_REASONING_TURNS = 2     # Chỉ giữ reasoning_details của 2 câu trả lời gần nhất -> file bộ nhớ không phình to
-# Token suy nghĩ TÍNH CHUNG vào max_tokens. Đặt thấp quá thì model dùng hết token để nghĩ và không còn gì để trả lời.
-LLM_MAX_TOKENS = int(env("LLM_MAX_TOKENS", "4096"))
-LLM_READ_TIMEOUT = int(env("LLM_READ_TIMEOUT", "150"))   # Giây chờ phản hồi (suy nghĩ lâu nên để dài)
-# Model dự phòng (cách nhau bằng dấu phẩy). Khi model chính lỗi, kể cả bị 429, OpenRouter tự chuyển sang model kế tiếp.
-# Chỉ liệt kê model đuôi ":free", nếu không OpenRouter sẽ tính tiền theo model thực sự được dùng. Để trống = không dự phòng.
-LLM_FALLBACK_MODELS = [m.strip() for m in env("LLM_FALLBACK_MODELS").split(",") if m.strip()]
+# --- LLM (qua OpenRouter) ---
+# Model chính + danh sách model free dự phòng (ngăn cách bằng dấu phẩy, thử lần lượt từ trái sang phải).
+# Model free hay bị gỡ/đổi mà không báo trước -> nếu một cái bị 404 thì sửa biến LLM_FALLBACK_MODELS trong bot.yml,
+# danh sách hiện có xem ở https://openrouter.ai/collections/free-models . Đặt "-" để tắt hẳn dự phòng.
+# "openrouter/free" là bộ định tuyến tự chọn ngẫu nhiên một model free còn sống -> để cuối làm phao cứu sinh.
+DEFAULT_LLM_MODEL = "dots-studio/dots-3-note-preview:free"
+DEFAULT_LLM_FALLBACKS = (
+    "thinkingmachines/inkling:free,"
+    "thinkingmachines/inkling-small:free,"
+    "nvidia/nemotron-3-ultra-550b-a55b:free,"
+    "openrouter/free"
+)
+LLM_MODEL = env("LLM_MODEL", DEFAULT_LLM_MODEL)
+_fallbacks = env("LLM_FALLBACK_MODELS", DEFAULT_LLM_FALLBACKS)
+LLM_FALLBACK_MODELS = [] if _fallbacks == "-" else [m.strip() for m in _fallbacks.split(",") if m.strip()]
+LLM_CHAIN = list(dict.fromkeys([LLM_MODEL] + LLM_FALLBACK_MODELS))   # Thứ tự thử, bỏ trùng
+LLM_REASONING = env("LLM_REASONING", "1") == "1"     # "1" = bật chế độ suy luận (reasoning) như mẫu OpenRouter; "0" = tắt cho nhanh
+LLM_MAX_TOKENS = int(env("LLM_MAX_TOKENS", "3000"))  # Token suy luận cũng tính vào đây nên để rộng hơn chat thường
+LLM_TIMEOUT = int(env("LLM_TIMEOUT", "60"))          # Giây chờ phản hồi tối đa cho MỖI model
+LLM_TOTAL_BUDGET = int(env("LLM_TOTAL_BUDGET", "150"))   # Tổng giây tối đa cho cả chuỗi model trước khi bỏ cuộc lượt này
 
 # --- Giọng nói (TTS) ---
-TTS_MODEL = env("TTS_MODEL", "fish-audio/s2.1-pro-free:free")
-# ID giọng của Fish Audio (dãy hex 32 ký tự, lấy ở thư viện giọng của Fish Audio). Để trống = giọng mặc định của model.
-TTS_VOICE = env("TTS_VOICE", "")
-# Chỉ dẫn cách đọc (giọng điệu, nhịp, cảm xúc), Fish Audio có hỗ trợ. Vd: "Giọng nữ trẻ, ngọt ngào, nhẹ nhàng". Để trống = không gửi.
-TTS_INSTRUCTIONS = env("TTS_INSTRUCTIONS", "")
-TTS_MAX_CHARS = int(env("TTS_MAX_CHARS", "2000"))   # Trang model không nêu giới hạn độ dài -> tự đặt mức an toàn
+# Bản ":free" sẽ bị OpenRouter gỡ ngày 30/11/2026 -> sau đó đổi TTS_MODEL thành "heygen/heygen-voice-1-turbo" (trả phí).
+TTS_MODEL = env("TTS_MODEL", "heygen/heygen-voice-1-turbo:free")
+# 10 giọng có sẵn: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+TTS_VOICE = env("TTS_VOICE", "sabrina")
 SEND_TEXT_ALSO = env("SEND_TEXT_ALSO", "0") == "1"   # "1" = gửi thêm bản chữ ngay sau voice
 OPENROUTER_TITLE = env("OPENROUTER_TITLE", "Linh Voice Bot")   # Tên hiển thị trên openrouter.ai (tùy chọn)
 OPENROUTER_REFERER = env("OPENROUTER_REFERER", "")             # URL site cho bảng xếp hạng (tùy chọn, có thể để trống)
-# "deny" = chỉ dùng nhà cung cấp cam kết không thu thập dữ liệu. Mặc định để trống (= allow) vì nhiều endpoint miễn phí
-# không có tùy chọn này, đặt "deny" có thể khiến model free báo 404.
-OPENROUTER_DATA_COLLECTION = env("OPENROUTER_DATA_COLLECTION", "")
 
 # Nội dung nhân vật nằm trong Secrets. Giá trị mặc định dưới đây cố tình trung tính
 # để mã nguồn public không chứa nội dung nhạy cảm.
@@ -93,7 +94,6 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_VOICE_SUFFIX = (
     "[Lưu ý giọng nói: lời của em sẽ được chuyển thành giọng nói gửi cho anh. "
     "Hãy nói tự nhiên như đang trò chuyện, câu ngắn gọn dễ đọc thành tiếng, ưu tiên 2-4 câu. "
-    "Chỉ viết bằng tiếng Việt, không chèn chữ Hán hay chữ Trung/Nhật/Hàn. "
     "Không dùng emoji, không dùng định dạng markdown; viết số và từ viết tắt thành dạng dễ đọc. "
     "Cử chỉ đặt trong dấu * sẽ KHÔNG được đọc ra, nên lời nói phải tự đủ ý.]"
 )
@@ -111,23 +111,25 @@ PROACTIVE_INSTRUCTION = env("PROACTIVE_INSTRUCTION", DEFAULT_PROACTIVE_INSTRUCTI
 # ============================================================
 # HẰNG SỐ HỆ THỐNG
 # ============================================================
-CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
+LLM_URL = "https://openrouter.ai/api/v1/chat/completions"
 GH_API = "https://api.github.com"
 # Tên file lưu bộ nhớ trong repo riêng tư. Giữ "state.json" = dùng tiếp bộ nhớ của bot cũ;
-# đặt tên khác (vd state_xing.json) nếu muốn bản này có bộ nhớ riêng.
+# đặt tên khác (vd state_voice.json) nếu muốn bản voice có bộ nhớ riêng.
 STATE_FILE = env("STATE_FILE", "state.json")
 
+TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
+TTS_MAX_CHARS = 4800         # HeyGen Voice cho tối đa 5.000 ký tự mỗi lần gọi
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
+# HeyGen Voice CHỈ hỗ trợ response_format "pcm": 16-bit little-endian, mono, theo trang model là 44,1 kHz.
+# Nếu nghe giọng nhanh/chậm/méo thì đổi biến TTS_PCM_RATE (thử 24000, 22050...). Header Content-Type có "rate=" thì ưu tiên theo header.
+PCM_SAMPLE_RATE = int(env("TTS_PCM_RATE", "44100"))
 
 MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
 MAX_STORED_MESSAGES = 60     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
-RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
 MAX_RETRY_PER_UPDATE = 3     # Một tin nhắn lỗi tối đa 3 lần thì bỏ qua
-MAX_RETRY_BUSY = 6           # Riêng khi nhà cung cấp model quá tải (429 từ upstream) thì kiên nhẫn hơn: ~4 phút
 
 # --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
 PROACTIVE_ENABLED = True
@@ -169,7 +171,7 @@ session = requests.Session()  # Dùng lại kết nối -> nhanh và nhẹ
 # ============================================================
 # store = toàn bộ trạng thái cần giữ giữa các lượt chạy
 store = {
-    "history": [],       # Danh sách {"role": "user"/"assistant", "content": "...", ["reasoning_details": [...]]}
+    "history": [],       # Danh sách {"role": "user"/"assistant", "content": "..."}
     "last_user": 0.0,    # Lần cuối chủ nhân nhắn
     "last_event": 0.0,   # Lần cuối có tương tác (chủ nhân nhắn HOẶC Linh nhắn trước)
     "unanswered": 0,     # Số tin nhắn trước liên tiếp chưa được trả lời
@@ -243,18 +245,12 @@ def load_store():
         return
     history = data.get("history", [])
     if isinstance(history, list):
-        clean = []
-        for m in history:
-            if not (isinstance(m, dict)
-                    and m.get("role") in ("user", "assistant")
-                    and isinstance(m.get("content"), str)):
-                continue
-            item = {"role": m["role"], "content": m["content"]}
-            details = m.get("reasoning_details")
-            if m["role"] == "assistant" and isinstance(details, list) and details:
-                item["reasoning_details"] = details
-            clean.append(item)
-        store["history"] = clean
+        store["history"] = [
+            m for m in history
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+        ]
     for key, cast in (("last_user", float), ("last_event", float), ("unanswered", int)):
         try:
             store[key] = cast(data.get(key, store[key]))
@@ -266,20 +262,9 @@ def load_history():
     return list(store["history"])
 
 
-def prune_reasoning(history):
-    """Chỉ giữ reasoning_details ở KEEP_REASONING_TURNS câu trả lời gần nhất, các câu cũ hơn bỏ đi."""
-    kept = 0
-    for m in reversed(history):
-        if m.get("role") == "assistant" and "reasoning_details" in m:
-            kept += 1
-            if not KEEP_REASONING or kept > KEEP_REASONING_TURNS:
-                m.pop("reasoning_details", None)
-    return history
-
-
 def save_history(history):
     """Cập nhật lịch sử trong store rồi đẩy lên repo riêng tư."""
-    store["history"] = prune_reasoning(history[-MAX_STORED_MESSAGES:])
+    store["history"] = history[-MAX_STORED_MESSAGES:]
     push_state()
 
 
@@ -358,171 +343,55 @@ def send_action(chat_id, action):
         pass
 
 
-class ChatAction:
-    """
-    Giữ trạng thái 'đang nhập...' / 'đang ghi âm...' suốt lúc chờ. Telegram chỉ hiển thị mỗi lần ~5 giây,
-    mà model suy nghĩ có thể mất cả chục giây -> chạy một luồng nền gửi lại mỗi 4 giây để Linh không bị "đứng hình".
-    Luồng nền dùng requests.post riêng (không dùng chung session) cho an toàn.
-    """
-
-    def __init__(self, chat_id, action="typing"):
-        self.chat_id = chat_id
-        self.action = action
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self):
-        url = "https://api.telegram.org/bot{}/sendChatAction".format(TELEGRAM_BOT_TOKEN)
-        while not self._stop.is_set():
-            try:
-                requests.post(url, json={"chat_id": self.chat_id, "action": self.action}, timeout=5)
-            except Exception:
-                pass
-            self._stop.wait(4)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self._stop.set()
-        self._thread.join(timeout=2)
-        return False
+def send_typing(chat_id):
+    send_action(chat_id, "typing")
 
 
 # ============================================================
-# OPENROUTER (dùng chung cho chat và giọng nói)
-# ============================================================
-class RateLimitError(Exception):
-    """
-    OpenRouter báo 429. `wait` = số giây nên chờ trước khi thử lại.
-    `upstream` = True nếu lỗi do NHÀ CUNG CẤP của model đang quá tải/giới hạn (không phải hạn mức tài khoản của bạn).
-    """
-
-    def __init__(self, wait=RATE_LIMIT_DELAY, upstream=False):
-        super().__init__("OpenRouter báo 429 ({})".format("nhà cung cấp model quá tải" if upstream else "giới hạn tốc độ/hạn mức"))
-        self.wait = wait
-        self.upstream = upstream
-
-
-# Gợi ý dễ hiểu cho các mã lỗi thường gặp (hiện trong log Actions để bạn biết sửa gì)
-OR_HINTS = {
-    400: "tham số bị từ chối - xem thông báo ngay trước",
-    401: "sai hoặc thiếu OPENROUTER_API_KEY",
-    402: "OpenRouter hết credit",
-    404: "model không tồn tại/đã bị gỡ (kiểm tra tên model trên openrouter.ai, thử bỏ đuôi ':free'), "
-         "hoặc không có endpoint nào khớp chính sách dữ liệu của tài khoản (Settings > Privacy)",
-}
-# 429 có thể đến từ HAI nơi nên hai gợi ý khác nhau
-HINT_429_UPSTREAM = (
-    "nhà cung cấp của model đang quá tải hoặc tự giới hạn (KHÔNG phải hạn mức tài khoản của bạn; model free thường chỉ có "
-    "1 nhà cung cấp nên không có đường dự phòng). Bot tự chờ rồi thử lại; muốn né hẳn thì đặt LLM_FALLBACK_MODELS"
-)
-HINT_429_ACCOUNT = (
-    "chạm hạn mức của OpenRouter cho model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
-    "(1000/ngày nếu đã nạp). Mỗi lượt trả lời tốn 2 yêu cầu (chat + giọng nói)"
-)
-
-
-def or_headers():
-    headers = {
-        "Authorization": "Bearer {}".format(OPENROUTER_API_KEY),
-        "Content-Type": "application/json",
-        "X-OpenRouter-Title": OPENROUTER_TITLE,
-    }
-    if OPENROUTER_REFERER:
-        headers["HTTP-Referer"] = OPENROUTER_REFERER
-    return headers
-
-
-def provider_prefs():
-    """Tùy chọn chính sách dữ liệu gửi kèm mỗi yêu cầu (None nếu không đặt)."""
-    if OPENROUTER_DATA_COLLECTION in ("allow", "deny"):
-        return {"data_collection": OPENROUTER_DATA_COLLECTION}
-    return None
-
-
-def report_openrouter_error(what, status, error, fallback_text=""):
-    """
-    Ghi log một lỗi của OpenRouter (kèm gợi ý cách sửa) và trả về True nếu lỗi do NHÀ CUNG CẤP upstream gây ra.
-    Khối `error.metadata` cho biết nhà cung cấp nào và mã lỗi gốc của họ. Với 429/5xx (lỗi dung lượng, không
-    chứa nội dung chat) mới in thêm `raw`; lỗi 400 chỉ in thông điệp để chắc chắn không lộ nội dung vào log công khai.
-    """
-    reason, extra, upstream = str(fallback_text), "", False
-    if isinstance(error, dict):
-        reason = str(error.get("message") or fallback_text)
-        upstream = "provider returned error" in reason.lower()
-        meta = error.get("metadata")
-        if isinstance(meta, dict):
-            parts = []
-            for key in ("provider_name", "provider_code"):
-                if meta.get(key) not in (None, ""):
-                    parts.append("{}={}".format(key, meta[key]))
-            if status == 429 or status >= 500:
-                if meta.get("raw") not in (None, ""):
-                    parts.append("raw={}".format(str(meta["raw"])[:300]))
-            extra = ", ".join(parts)
-            upstream = upstream or bool(meta.get("provider_name"))
-    elif error:
-        reason = str(error)
-
-    if status == 429:
-        hint = HINT_429_UPSTREAM if upstream else HINT_429_ACCOUNT
-    else:
-        hint = OR_HINTS.get(status, "")
-    logging.error(
-        "OpenRouter %s HTTP %s: %s%s%s",
-        what,
-        status,
-        reason[:200],
-        " [" + extra + "]" if extra else "",
-        " -> " + hint if hint else "",
-    )
-    return upstream
-
-
-def check_openrouter_response(resp, what):
-    """
-    Nếu OpenRouter trả lỗi HTTP thì ghi rõ lý do + gợi ý cách sửa (không ghi nội dung chat) rồi ném lỗi.
-    Riêng 429 ném RateLimitError để phía trên biết đường chờ lâu hơn thay vì thử dồn dập.
-    """
-    if resp.status_code < 400:
-        return
-    error = None
-    try:
-        data = resp.json()
-        if isinstance(data, dict):
-            error = data.get("error") or data.get("message")
-    except ValueError:
-        pass
-    upstream = report_openrouter_error(what, resp.status_code, error, resp.text[:200])
-    if resp.status_code == 429:
-        try:
-            wait = min(60, max(5, int(resp.headers.get("Retry-After", RATE_LIMIT_DELAY))))
-        except (TypeError, ValueError):
-            wait = RATE_LIMIT_DELAY
-        raise RateLimitError(wait, upstream)
-    resp.raise_for_status()
-
-
-# ============================================================
-# CHAT: Xing4.0 29B A4B qua OpenRouter
+# LLM: Dots3-Note Preview qua OpenRouter (lỗi thì tự chuyển sang model free dự phòng)
 # ============================================================
 # Các mẫu nhận diện câu trả lời "vô nghĩa" do model sinh lỗi
-CJK_PATTERN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")  # chữ Trung/Nhật/Hàn
+CJK_PATTERN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")  # chữ Trung/Nhật/Hàn
 REPEAT_CHAR_PATTERN = re.compile(r"(.)\1{14,}")   # 1 ký tự lặp liên tiếp từ 15 lần
 LEAK_MARKERS = ("[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói")   # model lỡ đọc lại chỉ dẫn nội bộ
 VI_CHARS = set("àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ")
-THINK_PATTERN = re.compile(r"<think>.*?</think>", re.S | re.I)   # Phòng khi model để lộ phần suy nghĩ trong content
+THINK_PATTERN = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)   # <think>...</think>
+THINK_CLOSE_PATTERN = re.compile(r"</think(?:ing)?>", re.I)
+THINK_OPEN_PATTERN = re.compile(r"<think(?:ing)?>.*$", re.S | re.I)
+# Gợi ý dễ hiểu cho các mã lỗi hay gặp khi gọi LLM (hiện trong log Actions để bạn biết sửa gì)
+LLM_HINTS = {
+    400: "yêu cầu bị từ chối - model không nhận một tham số nào đó",
+    401: "sai hoặc thiếu OPENROUTER_API_KEY",
+    402: "số dư credit OpenRouter đang âm (model :free cũng báo 402 khi âm) -> nạp thêm credit",
+    404: "model đã bị gỡ hoặc không có endpoint - nếu thông báo nhắc 'data policy' thì bật free endpoints "
+         "ở openrouter.ai/settings/privacy",
+    429: "chạm giới hạn của model :free (20 lượt/phút; 50 lượt/ngày, hoặc 1000 nếu từng nạp >= 10 USD credit; "
+         "tính chung cho cả tài khoản, gồm LLM lẫn giọng nói)",
+}
+LLM_DOWN_NOTICE = "Em đang hơi mệt một chút, lát nữa anh nhắn lại giúp em nhé 💋"
 
 
-def strip_think(text):
-    """Bỏ khối <think>...</think> (nếu có). Khối mở mà không đóng thì bỏ từ chỗ đó trở đi."""
-    text = THINK_PATTERN.sub("", text)
-    idx = text.lower().find("<think>")
-    if idx != -1:
-        text = text[:idx]
-    return text.strip()
+class LLMError(Exception):
+    """
+    Một model lỗi. Mặc định -> đổi sang model dự phòng kế tiếp.
+    fatal=True  : lỗi cấp tài khoản (sai key, âm credit, hết lượt free trong ngày) -> đổi model cũng vô ích.
+    block       : số giây tạm ngưng gọi LLM hoàn toàn (khi hết lượt free trong ngày).
+    cooldown    : số giây không thử lại riêng model này (vd model đã bị gỡ, đang bị giới hạn tốc độ).
+    """
+
+    def __init__(self, message, fatal=False, block=0, cooldown=0):
+        super().__init__(message)
+        self.fatal = fatal
+        self.block = block
+        self.cooldown = cooldown
+
+
+class LLMUnavailable(Exception):
+    """Không thể gọi LLM nếu không có can thiệp của bạn (hết lượt free/ngày, sai key, âm credit)."""
+
+
+llm_block = {"until": 0.0}   # Hết lượt free trong ngày -> tạm ngưng gọi API tới mốc này
+model_cooldown = {}          # model -> thời điểm được thử lại (tránh mỗi tin đều phí lượt vào model đang hỏng)
 
 
 def find_problem(text):
@@ -560,88 +429,160 @@ def trim_incomplete(text):
     return text
 
 
-def post_chat(payload):
-    """Gọi OpenRouter chat/completions. Ném lỗi nếu HTTP lỗi, hoặc HTTP 200 nhưng thân phản hồi là lỗi."""
-    resp = session.post(CHAT_URL, headers=or_headers(), json=payload, timeout=(5, LLM_READ_TIMEOUT))
-    check_openrouter_response(resp, "chat")
-    data = resp.json()
-    error = data.get("error")
-    if isinstance(error, dict) and not data.get("choices"):
-        code = error.get("code")
-        status = code if isinstance(code, int) else 502
-        upstream = report_openrouter_error("chat (lỗi trong thân phản hồi)", status, error)
-        if status == 429:
-            raise RateLimitError(RATE_LIMIT_DELAY, upstream)
-        raise RuntimeError("OpenRouter chat lỗi (code {})".format(code))
-    used = data.get("model")
-    if LLM_FALLBACK_MODELS and used and used != LLM_MODEL:
-        logging.info("Lượt này model chính lỗi, đã dùng model dự phòng: %s", used)   # Tên model không nhạy cảm
-    return data
+def strip_think(text):
+    """Model suy luận đôi khi để cả phần suy nghĩ trong content (<think>...</think>) -> bỏ đi, chỉ giữ lời nói."""
+    text = THINK_PATTERN.sub("", text)
+    text = THINK_CLOSE_PATTERN.split(text)[-1]    # còn thẻ đóng lẻ -> lấy phần đứng sau nó
+    text = THINK_OPEN_PATTERN.sub("", text)       # thẻ mở bị cắt dở -> bỏ phần đuôi
+    return text.strip()
+
+
+def openrouter_headers():
+    """Header dùng chung cho cả LLM và TTS (cùng một khóa OPENROUTER_API_KEY)."""
+    headers = {
+        "Authorization": "Bearer {}".format(OPENROUTER_API_KEY),
+        "Content-Type": "application/json",
+        "X-OpenRouter-Title": OPENROUTER_TITLE,
+    }
+    if OPENROUTER_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_REFERER
+    return headers
+
+
+def error_reason(resp):
+    """Lấy thông báo lỗi từ phản hồi HTTP của OpenRouter (thông tin hệ thống, không chứa nội dung chat)."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return resp.text[:150]
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or "")[:150]
+        return str(error or data.get("message") or "")[:150]
+    return ""
+
+
+def llm_error_from_http(status, reason):
+    """Phân loại lỗi HTTP: đổi model dự phòng được, hay là lỗi cấp tài khoản?"""
+    low = reason.lower()
+    if status in (401, 402):
+        return LLMError("HTTP {}".format(status), fatal=True)
+    if status == 429 and ("per-day" in low or "per day" in low or "daily" in low):
+        # Hạn mức free tính CHUNG cả tài khoản, đổi sang model :free khác cũng vẫn hết -> ngưng 1 giờ rồi thử lại
+        return LLMError("HTTP 429 (hết lượt free trong ngày)", fatal=True, block=3600)
+    if status == 429:
+        return LLMError("HTTP 429", cooldown=120)
+    if status == 404:
+        return LLMError("HTTP 404", cooldown=3600)      # model bị gỡ -> đừng thử lại liên tục
+    if status in (400, 403):
+        return LLMError("HTTP {}".format(status))        # có thể chỉ do một tin cụ thể -> không phạt model
+    return LLMError("HTTP {}".format(status), cooldown=60)   # 5xx, quá tải...
+
+
+def request_llm(model, messages, temperature, read_timeout):
+    """Gọi MỘT model qua OpenRouter. Trả về câu trả lời đã kiểm tra, hoặc ném LLMError."""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": LLM_MAX_TOKENS,   # token suy luận cũng tính vào đây -> để rộng hơn chat thường
+        "stream": False,
+    }
+    if LLM_REASONING:
+        # enabled: bật chế độ suy luận. exclude: vẫn suy luận nhưng KHÔNG trả phần suy nghĩ về
+        # (bot chỉ cần lời nói, lịch sử lưu dạng chữ thường nên không cần giữ reasoning_details giữa các lượt)
+        payload["reasoning"] = {"enabled": True, "exclude": True}
+
+    try:
+        resp = session.post(LLM_URL, headers=openrouter_headers(), json=payload, timeout=(5, read_timeout))
+    except requests.RequestException as e:
+        raise LLMError("lỗi mạng/timeout ({})".format(type(e).__name__), cooldown=60)
+
+    if resp.status_code >= 400:
+        reason = error_reason(resp)
+        logging.error(
+            "OpenRouter LLM HTTP %s (%s): %s%s",
+            resp.status_code, model, reason,
+            " -> " + LLM_HINTS[resp.status_code] if resp.status_code in LLM_HINTS else "",
+        )
+        raise llm_error_from_http(resp.status_code, reason)
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise LLMError("phản hồi không phải JSON", cooldown=60)
+
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        # OpenRouter đôi khi trả HTTP 200 nhưng nội dung là {"error": {...}} khi nhà cung cấp phía sau lỗi
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            code = error.get("code")
+            reason = str(error.get("message") or "")[:150]
+            logging.error("OpenRouter LLM lỗi trong thân phản hồi (%s, mã %s): %s", model, code, reason)
+            if isinstance(code, int) and code >= 400:
+                raise llm_error_from_http(code, reason)
+        raise LLMError("phản hồi không có câu trả lời", cooldown=60)
+
+    choice = choices[0]
+    content = (choice.get("message") or {}).get("content")
+    content = strip_think(content if isinstance(content, str) else "")
+
+    # Bị cắt vì hết token -> bỏ câu dở dang ở cuối
+    if choice.get("finish_reason") == "length":
+        content = trim_incomplete(content)
+
+    problem = find_problem(content)
+    if problem:
+        # Log công khai: chỉ ghi lý do và độ dài, KHÔNG ghi nội dung
+        logging.warning("Loại câu trả lời lỗi của %s (%s), dài %s ký tự", model, problem, len(content))
+        raise LLMError("trả lời lỗi: {}".format(problem))
+    return content
 
 
 def call_llm(messages):
     """
-    Gửi messages tới Xing4.0 qua OpenRouter. Trả về (câu trả lời, reasoning_details hoặc None).
-    Câu trả lời lỗi/vô nghĩa bị loại và thử lại 1 lần với nhiệt độ thấp hơn. Lỗi HTTP/timeout sẽ ném
-    exception cho vòng lặp chính xử lý.
+    Thử lần lượt Dots3-Note rồi tới các model free dự phòng cho đến khi có câu trả lời tốt.
+    - Model lỗi (HTTP lỗi, timeout, trả lời vô nghĩa/rỗng) -> chuyển sang model kế tiếp.
+    - Lỗi cấp tài khoản (sai key, âm credit, hết lượt free/ngày) -> ném LLMUnavailable, không đổi model nữa.
+    - Tất cả model đều lỗi -> ném ValueError: KHÔNG gửi, KHÔNG lưu bộ nhớ, vòng lặp chính sẽ thử lại tin này.
     """
-    last_problem = "không rõ"
-    reasoning_on = LLM_REASONING
-    for attempt in range(2):
-        payload = {
-            "model": LLM_MODEL,
-            "messages": messages,
-            # Bật: {"enabled": true} đúng như mẫu OpenRouter. Tắt: effort "none" là cách được tài liệu ghi nhận.
-            "reasoning": {"enabled": True} if reasoning_on else {"effort": "none"},
-            "temperature": 1.0 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
-            "max_tokens": LLM_MAX_TOKENS,
-            "stream": False,
-        }
-        if LLM_FALLBACK_MODELS:
-            # Theo tài liệu OpenRouter: danh sách theo thứ tự ưu tiên, model đầu lỗi (kể cả 429) thì thử model kế tiếp
-            del payload["model"]
-            payload["models"] = [LLM_MODEL] + LLM_FALLBACK_MODELS
-        prefs = provider_prefs()
-        if prefs:
-            payload["provider"] = prefs
+    started = time.time()
+    if started < llm_block["until"]:
+        raise LLMUnavailable("đang tạm ngưng gọi LLM vì hết lượt free trong ngày")
 
+    # Bỏ qua model đang "nghỉ" (vừa bị gỡ/giới hạn tốc độ); nếu tất cả đều đang nghỉ thì thử lại hết
+    ready = [m for m in LLM_CHAIN if model_cooldown.get(m, 0) <= started]
+    candidates = ready or list(LLM_CHAIN)
+
+    last_error = "không rõ"
+    for index, model in enumerate(candidates):
+        remaining = LLM_TOTAL_BUDGET - (time.time() - started)
+        if index > 0 and remaining <= 10:
+            logging.warning("Hết ngân sách thời gian gọi LLM (%ss), dừng chuyển model", LLM_TOTAL_BUDGET)
+            break
+        read_timeout = max(10, min(LLM_TIMEOUT, remaining))
+        # Model đầu nhiệt độ cao cho tự nhiên; model dự phòng hạ xuống cho ổn định
+        temperature = 1.0 if index == 0 else 0.7
         try:
-            data = post_chat(payload)
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status == 400 and any("reasoning_details" in m for m in messages):
-                # Phòng khi API không nhận reasoning_details cũ: bỏ chúng đi rồi thử lại 1 lần
-                logging.warning("API từ chối reasoning_details cũ -> thử lại không gửi kèm")
-                messages = [{k: v for k, v in m.items() if k != "reasoning_details"} for m in messages]
-                payload["messages"] = messages
-                data = post_chat(payload)
-            else:
-                raise
+            text = request_llm(model, messages, temperature, read_timeout)
+        except LLMError as e:
+            last_error = "{} ({})".format(e, model)
+            if e.fatal:
+                if e.block:
+                    llm_block["until"] = time.time() + e.block
+                raise LLMUnavailable(last_error)
+            if e.cooldown:
+                model_cooldown[model] = time.time() + e.cooldown
+            logging.warning("Model %s lỗi: %s -> thử model kế tiếp", model, e)
+            continue
 
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        raw = message.get("content")
-        content = strip_think(raw) if isinstance(raw, str) else ""
-        details = message.get("reasoning_details") if reasoning_on else None
+        if model != LLM_CHAIN[0]:
+            logging.info("Đã trả lời bằng model dự phòng: %s", model)
+        return text
 
-        if choice.get("finish_reason") == "length":
-            if content:
-                content = trim_incomplete(content)   # Bị cắt vì hết token -> bỏ câu dở dang ở cuối
-            elif reasoning_on:
-                # Model dùng hết token vào phần suy nghĩ, chưa kịp trả lời -> lần thử sau tắt suy nghĩ
-                logging.warning("Hết %s token mà chưa có câu trả lời (đang suy nghĩ) -> thử lại không suy nghĩ", LLM_MAX_TOKENS)
-                reasoning_on = False
-
-        problem = find_problem(content)
-        if problem is None:
-            return content, (details if isinstance(details, list) and details else None)
-
-        # Log công khai: chỉ ghi lý do và độ dài, KHÔNG ghi nội dung
-        last_problem = problem
-        logging.warning("Loại câu trả lời lỗi (%s), lần %s, dài %s ký tự", problem, attempt + 1, len(content))
-
-    # Lỗi cả 2 lần -> ném exception: KHÔNG gửi, KHÔNG lưu vào bộ nhớ, vòng lặp chính sẽ thử lại
-    raise ValueError("Xing trả lời lỗi 2 lần liền: {}".format(last_problem))
+    raise ValueError("Tất cả model LLM đều lỗi, lỗi cuối: {}".format(last_error))
 
 
 def build_context(history):
@@ -652,13 +593,7 @@ def build_context(history):
         window = window[1:]
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in window:
-        item = {"role": m["role"], "content": m["content"]}
-        details = m.get("reasoning_details")
-        # Gửi lại reasoning_details đúng nguyên bản (không sửa) như mẫu của OpenRouter
-        if KEEP_REASONING and m["role"] == "assistant" and isinstance(details, list) and details:
-            item["reasoning_details"] = details
-        messages.append(item)
+    messages.extend(window)
     return messages
 
 
@@ -668,7 +603,7 @@ def with_reminder(text):
 
 
 def ask_llm(user_text, history):
-    """Trả lời tin nhắn mới của chủ nhân. Trả về (câu trả lời, reasoning_details hoặc None)."""
+    """Trả lời tin nhắn mới của chủ nhân."""
     messages = build_context(history)
     messages.append({"role": "user", "content": with_reminder(user_text)})
     return call_llm(messages)
@@ -679,25 +614,25 @@ def generate_proactive(history, idle_hours):
     messages = build_context(history)
     instruction = PROACTIVE_INSTRUCTION.replace("{hours}", str(idle_hours))
     messages.append({"role": "user", "content": with_reminder(instruction)})
-    text, _ = call_llm(messages)   # Chỉ dẫn nội bộ không được lưu -> cũng không lưu reasoning_details của lượt này
-    return text
+    return call_llm(messages)
 
 
 # ============================================================
-# GIỌNG NÓI: Fish Audio S2.1 Pro qua OpenRouter -> Telegram sendVoice
+# GIỌNG NÓI: HeyGen Voice Turbo qua OpenRouter -> Telegram sendVoice
 # ============================================================
 GESTURE_PATTERN = re.compile(r"\*[^*]*\*")   # *cử chỉ* - không đọc thành tiếng
 EMOJI_PATTERN = re.compile(
-    "[\U0001F000-\U0001FAFF←-⇿☀-➿⬀-⯿️‍⃣]+"
+    "[\U0001F000-\U0001FAFF\u2190-\u21FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200d\u20e3]+"
 )
-
-
-def truncate_at_sentence(text, limit):
-    """Cắt gọn về `limit` ký tự, ưu tiên cắt ở cuối câu để giọng đọc không đứt giữa chừng."""
-    if len(text) <= limit:
-        return text
-    cut = max(text.rfind(ch, 0, limit) for ch in ".!?…")
-    return text[:cut + 1] if cut > limit * 0.5 else text[:limit]
+# Gợi ý dễ hiểu cho các mã lỗi thường gặp (hiện trong log Actions để bạn biết sửa gì)
+TTS_HINTS = {
+    400: "tham số bị từ chối - xem thông báo ngay trước (vd voice không có trong 10 giọng, hoặc response_format khác pcm)",
+    401: "sai hoặc thiếu OPENROUTER_API_KEY",
+    402: "OpenRouter hết credit (model trả phí cần nạp tiền)",
+    404: "model/voice không tồn tại - nếu đã qua 30/11/2026 thì bản :free đã bị gỡ, hãy đổi TTS_MODEL",
+    429: "chạm giới hạn của model :free (20 lượt/phút; 50 lượt/ngày, hoặc 1000 nếu từng nạp >= 10 USD credit; "
+         "tính chung cả LLM lẫn giọng nói, mỗi câu trả lời tốn 2 lượt)",
+}
 
 
 def clean_for_speech(text):
@@ -713,69 +648,89 @@ def clean_for_speech(text):
     text = re.sub(r"\s+", " ", text).strip()
     if not re.search(r"\w", text):
         return ""
-    return truncate_at_sentence(text, TTS_MAX_CHARS)
+    return text[:TTS_MAX_CHARS]
 
 
-def looks_like_mp3(data):
-    """Dấu hiệu đầu file mp3: thẻ 'ID3' hoặc khung đồng bộ 0xFFEx."""
-    return data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0)
-
-
-def to_ogg_opus(audio):
+def detect_audio(data):
     """
-    Đổi mp3 sang ogg/opus bằng ffmpeg - định dạng Telegram hiển thị thành bong bóng tin nhắn thoại
-    (mp3 gửi thẳng vẫn phát được nhưng dễ hiện như file nhạc).
+    Phòng khi sau này API trả sẵn mp3/ogg: nhận ra qua dấu hiệu đầu file ('ID3' hoặc 'OggS').
+    Ngoài ra coi là PCM thô (đường chính hiện nay của HeyGen).
+    """
+    if data[:3] == b"ID3":
+        return "mp3"
+    if data[:4] == b"OggS":
+        return "ogg"
+    return None
+
+
+def pcm_to_ogg(pcm, rate):
+    """
+    Đổi PCM thô (16-bit little-endian, mono) sang ogg/opus bằng ffmpeg - định dạng Telegram phát được
+    dưới dạng tin nhắn thoại. ffmpeg là BẮT BUỘC (workflow đã có bước cài).
     """
     if not shutil.which("ffmpeg"):
-        raise RuntimeError("máy không có ffmpeg")
+        raise RuntimeError("máy không có ffmpeg để đổi PCM sang ogg/opus")
+    if len(pcm) % 2:
+        pcm = pcm[:-1]   # PCM 16-bit phải chẵn byte
     proc = subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-vn",
-         "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
-         "-ar", "48000", "-ac", "1", "-f", "ogg", "pipe:1"],
-        input=audio, capture_output=True, timeout=60,
+        ["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(rate), "-ac", "1",
+         "-i", "pipe:0", "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
+         "-ar", "48000", "-f", "ogg", "pipe:1"],
+        input=pcm, capture_output=True, timeout=60,
     )
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError("ffmpeg lỗi: {}".format(proc.stderr.decode("utf-8", "ignore")[:150]))
     return proc.stdout
 
 
+def check_tts_response(resp):
+    """Nếu OpenRouter trả lỗi HTTP thì ghi rõ lý do + gợi ý cách sửa (không ghi nội dung chat) rồi ném lỗi."""
+    if resp.status_code < 400:
+        return
+    reason = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            error = data.get("error")
+            reason = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or ""
+    except ValueError:
+        pass
+    logging.error(
+        "OpenRouter TTS HTTP %s: %s%s",
+        resp.status_code,
+        str(reason)[:150],
+        " -> " + TTS_HINTS[resp.status_code] if resp.status_code in TTS_HINTS else "",
+    )
+    resp.raise_for_status()
+
+
 def synthesize(text):
-    """
-    Gọi Fish Audio S2.1 Pro qua OpenRouter rồi đổi sang ogg/opus. Trả về (bytes âm thanh, 'ogg' hoặc 'mp3').
-    LƯU Ý: response_format mặc định của endpoint là "pcm" (thô, không phát được), nên PHẢI yêu cầu "mp3" rõ ràng.
-    """
+    """Gọi HeyGen Voice Turbo qua OpenRouter (PCM) rồi đổi sang ogg/opus. Trả về (bytes âm thanh, 'ogg')."""
     payload = {
         "model": TTS_MODEL,
         "input": text,
-        "response_format": "mp3",
+        "voice": TTS_VOICE,
+        # HeyGen Voice chỉ hỗ trợ "pcm" (gửi "mp3" sẽ bị lỗi 400: only supports response_format "pcm")
+        "response_format": "pcm",
     }
-    if TTS_VOICE:
-        payload["voice"] = TTS_VOICE
-    if TTS_INSTRUCTIONS:
-        payload["instructions"] = TTS_INSTRUCTIONS
-    prefs = provider_prefs()
-    if prefs:
-        payload["provider"] = prefs
+    resp = session.post(TTS_URL, headers=openrouter_headers(), json=payload, timeout=(5, 60))
+    check_tts_response(resp)
 
-    resp = session.post(TTS_URL, headers=or_headers(), json=payload, timeout=(5, 90))
-    check_openrouter_response(resp, "TTS")
-
-    ctype = resp.headers.get("Content-Type", "").lower()
-    if "json" in ctype:
+    if "json" in resp.headers.get("Content-Type", "").lower():
         raise ValueError("OpenRouter trả JSON thay vì âm thanh")
-    if "pcm" in ctype:
-        raise ValueError("OpenRouter trả PCM dù đã yêu cầu mp3")
     audio = resp.content
     if len(audio) < 1000:
         raise ValueError("Âm thanh rỗng hoặc quá ngắn ({} byte)".format(len(audio)))
 
-    try:
-        return to_ogg_opus(audio), "ogg"
-    except Exception as e:
-        if looks_like_mp3(audio):
-            logging.warning("Không đổi được sang ogg/opus (%s) -> gửi thẳng mp3", e)
-            return audio, "mp3"
-        raise
+    kind = detect_audio(audio)
+    if kind:                      # Đã là mp3/ogg sẵn -> gửi thẳng
+        return audio, kind
+
+    rate = PCM_SAMPLE_RATE
+    match = re.search(r"rate=(\d{4,6})", resp.headers.get("Content-Type", ""))
+    if match:                     # Header nói rõ tần số mẫu thì tin header
+        rate = int(match.group(1))
+    return pcm_to_ogg(audio, rate), "ogg"
 
 
 def text_to_voice(text):
@@ -784,17 +739,11 @@ def text_to_voice(text):
     for attempt in range(TTS_ATTEMPTS):
         try:
             return synthesize(text)
-        except RateLimitError:
-            raise   # Đang bị giới hạn: thử lại ngay chỉ phí lượt -> gửi chữ luôn
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code < 500:
-                raise   # Lỗi 4xx (sai khóa, hết credit, sai tham số...) thử lại cũng vậy
-            last_error = e
         except Exception as e:
             last_error = e
-        logging.warning("TTS lỗi lần %s/%s: %s", attempt + 1, TTS_ATTEMPTS, last_error)
-        if attempt + 1 < TTS_ATTEMPTS:
-            time.sleep(TTS_RETRY_DELAY)
+            logging.warning("TTS lỗi lần %s/%s: %s", attempt + 1, TTS_ATTEMPTS, e)
+            if attempt + 1 < TTS_ATTEMPTS:
+                time.sleep(TTS_RETRY_DELAY)
     raise last_error
 
 
@@ -807,8 +756,8 @@ def deliver(chat_id, text):
     spoken = clean_for_speech(text)
     if spoken:
         try:
-            with ChatAction(chat_id, "record_voice"):
-                audio, kind = text_to_voice(spoken)
+            send_action(chat_id, "record_voice")
+            audio, kind = text_to_voice(spoken)
             send_voice(chat_id, audio, kind)
         except Exception as e:
             logging.error("Không gửi được voice (%s) -> gửi bản chữ thay thế", e)
@@ -887,10 +836,10 @@ def maybe_send_proactive():
         schedule_next(now)
         save_history(history)
         logging.info("Đã nhắn trước (chưa trả lời: %s)", store["unanswered"])
-    except RateLimitError as e:
-        # Bị giới hạn tốc độ: dời lượt nhắn trước, không "đốt" thêm yêu cầu free
-        logging.error("Nhắn trước bị giới hạn tốc độ, thử lại sau %s giây", max(e.wait, PROACTIVE_RETRY_DELAY))
-        timer["next_at"] = time.time() + max(e.wait, PROACTIVE_RETRY_DELAY)
+    except LLMUnavailable as e:
+        # Hết lượt free/ngày, sai key, âm credit: thử lại ngay cũng vô ích -> hẹn lại sau 1 giờ
+        logging.error("Chưa nhắn trước được, LLM không dùng được: %s", e)
+        timer["next_at"] = time.time() + 3600
     except Exception as e:
         # Lỗi mạng / API: thử lại sau 1 phút, không làm sập vòng lặp
         logging.error("Lỗi khi nhắn trước: %s", e)
@@ -938,40 +887,33 @@ def handle_update(update):
         send_message(chat_id, "Em quên hết rồi nè, mình bắt đầu lại từ đầu nhé anh 💕")
         return True
 
+    send_typing(chat_id)
+
     history = load_history()                       # Đọc bộ nhớ
-    with ChatAction(chat_id, "typing"):            # Giữ "đang nhập..." trong lúc model suy nghĩ
-        reply, details = ask_llm(text, history)    # Gọi AI (lỗi sẽ ném exception ra ngoài)
+    try:
+        reply = ask_llm(text, history)             # Gọi AI (lỗi tạm thời sẽ ném exception ra ngoài để thử lại)
+    except LLMUnavailable as e:
+        # Lỗi cấp tài khoản (hết lượt free/ngày, sai key, âm credit): thử lại 3 lần cũng chỉ lặp lại lỗi,
+        # nên báo nhẹ một câu rồi bỏ qua tin này
+        logging.error("LLM không dùng được: %s", e)
+        send_message(chat_id, LLM_DOWN_NOTICE)
+        return True
     deliver(chat_id, reply)                        # Đọc thành giọng nói rồi gửi (lỗi thì gửi chữ)
 
     # Chỉ lưu vào bộ nhớ SAU KHI đã gửi thành công -> không bao giờ lưu nửa vời
     # (lưu bản chữ gốc, còn nguyên cử chỉ, chứ không phải bản đã lọc để đọc)
     history.append({"role": "user", "content": text})
-    entry = {"role": "assistant", "content": reply}
-    if KEEP_REASONING and details:
-        entry["reasoning_details"] = details
-    history.append(entry)
+    history.append({"role": "assistant", "content": reply})
     save_history(history)
     return True
 
 
-def notify_failure(error=None):
+def notify_failure():
     """Báo nhẹ cho chủ nhân khi một tin nhắn lỗi liên tục và bị bỏ qua."""
-    if isinstance(error, RateLimitError):
-        text = "Em đang bị nghẽn lượt nhắn nên chưa trả lời được, anh đợi vài phút rồi nhắn lại giúp em nhé 💋"
-    else:
-        text = "Em bị chập chờn sóng một chút, anh nhắn lại giúp em nhé 💋"
     try:
-        send_message(CHAT_ID, text)
+        send_message(CHAT_ID, "Em bị chập chờn sóng một chút, anh nhắn lại giúp em nhé 💋")
     except Exception as e:
         logging.error("Không gửi được thông báo lỗi: %s", e)
-
-
-def notify_busy():
-    """Báo một lần khi phải chờ lâu (nhà cung cấp model quá tải) để chủ nhân không tưởng bot đứng hình."""
-    try:
-        send_message(CHAT_ID, "Em đang hơi chậm một chút, anh đợi em xíu nhé 💕")
-    except Exception as e:
-        logging.error("Không gửi được thông báo chờ: %s", e)
 
 
 # ============================================================
@@ -1005,15 +947,8 @@ def main():
 
     deadline = time.time() + RUN_SECONDS
     logging.info("=== Bot khởi động (chạy tối đa %s giây) ===", RUN_SECONDS)
-    logging.info(
-        "LLM: %s (suy nghĩ: %s) | TTS: %s, giọng '%s'",
-        LLM_MODEL, "bật" if LLM_REASONING else "tắt", TTS_MODEL, TTS_VOICE or "mặc định",
-    )
-    if LLM_FALLBACK_MODELS:
-        logging.info("Model dự phòng: %s", ", ".join(LLM_FALLBACK_MODELS))
-        for name in LLM_FALLBACK_MODELS:
-            if not name.endswith(":free"):
-                logging.warning("Model dự phòng '%s' không có đuôi ':free' -> có thể bị tính tiền", name)
+    logging.info("LLM: %s | reasoning: %s", " -> ".join(LLM_CHAIN), "bật" if LLM_REASONING else "tắt")
+    logging.info("TTS: %s, giọng '%s'", TTS_MODEL, TTS_VOICE)
 
     if not startup_sync():
         return 1
@@ -1032,9 +967,8 @@ def main():
     # Tiếp tục đồng hồ nhắn trước từ mốc tương tác cuối (đã lưu từ lượt chạy trước)
     schedule_next(store["last_event"] or time.time())
 
-    offset = None           # update_id kế tiếp cần lấy
-    fail_count = 0          # Số lần liên tiếp tin hiện tại bị lỗi
-    busy_notified = False   # Đã báo "em đang chậm" cho tin hiện tại chưa
+    offset = None       # update_id kế tiếp cần lấy
+    fail_count = 0      # Số lần liên tiếp tin hiện tại bị lỗi
 
     try:
         while time.time() < deadline:
@@ -1042,14 +976,8 @@ def main():
                 updates = get_updates(offset)  # Treo tối đa 20s, có tin là trả về ngay
 
                 for update in updates:
-                    delay = RETRY_DELAY
-                    limit_error = None   # Có giá trị nếu lần lỗi này là 429
                     try:
                         ok = handle_update(update)
-                    except RateLimitError as e:
-                        limit_error = e
-                        logging.error("Lỗi khi xử lý tin nhắn: %s", e)
-                        ok = False
                     except Exception as e:
                         logging.error("Lỗi khi xử lý tin nhắn: %s", e)
                         ok = False
@@ -1057,27 +985,17 @@ def main():
                     if ok:
                         offset = update["update_id"] + 1   # Xác nhận đã xử lý xong tin này
                         fail_count = 0
-                        busy_notified = False
                         continue
 
                     # Tin bị lỗi: giữ nguyên offset để lần quét sau lấy lại đúng tin này
                     fail_count += 1
-                    busy = limit_error is not None and limit_error.upstream
-                    # Nhà cung cấp quá tải thường tự hết sau vài phút -> kiên nhẫn hơn (MAX_RETRY_BUSY lần) thay vì bỏ tin sớm
-                    max_tries = MAX_RETRY_BUSY if busy else MAX_RETRY_PER_UPDATE
-                    if limit_error is not None:
-                        delay = min(60, limit_error.wait * fail_count)   # Chờ lâu dần: 25s, 50s, 60s...
-                    if fail_count >= max_tries:
+                    if fail_count >= MAX_RETRY_PER_UPDATE:
                         offset = update["update_id"] + 1   # Quá số lần thử -> bỏ qua tin này
                         fail_count = 0
-                        busy_notified = False
-                        logging.error("Bỏ qua một tin nhắn sau %s lần lỗi", max_tries)
-                        notify_failure(limit_error)
+                        logging.error("Bỏ qua một tin nhắn sau %s lần lỗi", MAX_RETRY_PER_UPDATE)
+                        notify_failure()
                     else:
-                        if busy and not busy_notified:
-                            busy_notified = True
-                            notify_busy()
-                        time.sleep(delay)                  # Đợi rồi thử lại
+                        time.sleep(RETRY_DELAY)            # Đợi 5 giây rồi thử lại
                     break
 
                 # Sau mỗi lần quét: kiểm tra đã đến lúc Linh nhắn trước chưa
