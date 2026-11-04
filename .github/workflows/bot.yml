@@ -1,4 +1,4 @@
-name: Linh Voice Bot
+name: Linh Voice Bot (Dots)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -27,31 +27,30 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      # MỘT khóa OpenRouter dùng cho cả chat (Xing4.0) lẫn giọng nói (Fish Audio). KHÔNG còn cần DEEPSEEK_API_KEY.
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # MỘT khóa OpenRouter dùng cho cả LLM (Dots3-Note) lẫn giọng nói HeyGen
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-
-      # --- Chat (không nhạy cảm nên để thẳng ở đây) ---
-      LLM_MODEL: "xingchen-agi/xing4.0-29b-a4b:free"
-      LLM_REASONING: "1"          # "1" = bật suy nghĩ (chất lượng hơn nhưng chậm, có thể vài chục giây/lượt); "0" = tắt cho nhanh
-      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (như mẫu OpenRouter)
-      LLM_MAX_TOKENS: "4096"      # Token suy nghĩ tính chung vào mức này; đặt thấp quá thì model nghĩ xong là hết token
-      # Model dự phòng, cách nhau bằng dấu phẩy: khi Xing bị 429/lỗi thì OpenRouter tự chuyển sang model kế tiếp.
-      # CHỈ ghi model có đuôi ":free", nếu không sẽ bị tính tiền. Để trống = không dự phòng.
-      LLM_FALLBACK_MODELS: ""
-
-      # --- Giọng nói ---
-      TTS_MODEL: "fish-audio/s2.1-pro-free:free"
-      TTS_VOICE: ""               # ID giọng Fish Audio (dãy hex 32 ký tự). Để trống = giọng mặc định của model
-      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc, vd "Giọng nữ trẻ, ngọt ngào, nhẹ nhàng". Để trống = không gửi
+      # --- Cấu hình LLM (không nhạy cảm nên để thẳng ở đây) ---
+      # Model chính. Bản :free của Dots3-Note hiện hiển thị "sẽ gỡ ngày 31/12/2026" -> sau đó đổi sang model khác
+      LLM_MODEL: "dots-studio/dots-3-note-preview:free"
+      # Model free dự phòng, thử lần lượt khi model chính lỗi (đặt "-" để tắt). Model free hay bị gỡ/đổi:
+      # xem danh sách mới nhất ở https://openrouter.ai/collections/free-models
+      LLM_FALLBACK_MODELS: "thinkingmachines/inkling:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/free"
+      LLM_REASONING: "1"          # "1" = bật reasoning; "0" = tắt nếu thấy trả lời chậm
+      LLM_MAX_TOKENS: "3000"      # Token suy luận cũng tính vào hạn mức này
+      LLM_TIMEOUT: "60"           # Giây chờ tối đa cho mỗi model
+      LLM_TOTAL_BUDGET: "150"     # Tổng giây tối đa cho cả chuỗi model trước khi bỏ cuộc lượt này
+      # --- Cấu hình giọng nói ---
+      # Bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo" (trả phí, cần nạp credit)
+      TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
+      # Giọng có sẵn: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+      TTS_VOICE: "sabrina"
+      TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
-      # STATE_FILE: "state_xing.json"        # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung state.json của bot cũ
-
+      # STATE_FILE: "state_voice.json"   # Bỏ comment nếu muốn bản voice có bộ nhớ riêng, không dùng chung với bot cũ
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
@@ -70,8 +69,8 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      # Fish Audio trả mp3; bot dùng ffmpeg đổi sang ogg/opus để Telegram hiện thành tin nhắn thoại (có sóng âm).
-      # Thiếu ffmpeg thì bot vẫn chạy và gửi thẳng mp3. Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
+      # BẮT BUỘC: HeyGen Voice chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được.
+      # Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
       - name: Cài ffmpeg
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
