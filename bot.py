@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-bot.py - Linh Bot chạy trên GitHub Actions (Long Polling).
+bot.py - Linh Voice Bot (bản Xing + Fish) chạy trên GitHub Actions (Long Polling).
+
+Bản VOICE: Xing4.0 29B A4B viết câu trả lời -> Fish Audio S2.1 Pro đọc thành giọng nói (mp3)
+-> đổi sang ogg/opus bằng ffmpeg -> gửi vào Telegram bằng sendVoice.
+CẢ HAI model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
+TTS hoặc gửi voice lỗi thì tự gửi chữ, bot không bao giờ im lặng.
 
 Khác bản chạy trên laptop:
 - Mọi khóa bí mật và nội dung nhân vật đọc từ GitHub Secrets (repo public không lộ gì).
@@ -17,9 +22,13 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
+import subprocess
 import sys
+import threading
 import time
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -36,47 +45,91 @@ def env(name, default=""):
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 CHAT_ID = env("CHAT_ID")
-OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")  # MỘT khóa OpenRouter dùng cho cả chat (Xing) lẫn giọng nói (Fish)
 STATE_REPO = env("STATE_REPO")                  # Dạng "ten-github/linh-bot-data" (repo RIÊNG TƯ)
 STATE_REPO_TOKEN = env("STATE_REPO_TOKEN")      # Token quyền Contents: Read and write cho repo đó
 
 RUN_SECONDS = int(env("RUN_SECONDS", "20400"))  # Thời gian chạy mỗi lượt (5h40m < giới hạn 6h)
 TZ_OFFSET_HOURS = float(env("TZ_OFFSET_HOURS", "7"))  # Múi giờ để tính giờ yên lặng (VN = +7)
 
+# --- Chat (LLM) ---
+LLM_MODEL = env("LLM_MODEL", "xingchen-agi/xing4.0-29b-a4b:free")
+# Xing4.0 BẬT sẵn chế độ suy nghĩ (reasoning). "1" = bật như mẫu của OpenRouter (trả lời chất lượng hơn nhưng chậm hơn:
+# model chạy khoảng 46 token/giây nên mỗi lượt suy nghĩ có thể tốn vài chục giây). "0" = tắt hẳn cho nhanh.
+LLM_REASONING = env("LLM_REASONING", "1") == "1"
+# "1" = lưu reasoning_details của vài câu trả lời gần nhất và gửi lại đúng nguyên bản ở lượt sau (như mẫu của OpenRouter).
+KEEP_REASONING = env("KEEP_REASONING", "1") == "1"
+KEEP_REASONING_TURNS = 2     # Chỉ giữ reasoning_details của 2 câu trả lời gần nhất -> file bộ nhớ không phình to
+# Token suy nghĩ TÍNH CHUNG vào max_tokens. Đặt thấp quá thì model dùng hết token để nghĩ và không còn gì để trả lời.
+LLM_MAX_TOKENS = int(env("LLM_MAX_TOKENS", "4096"))
+LLM_READ_TIMEOUT = int(env("LLM_READ_TIMEOUT", "150"))   # Giây chờ phản hồi (suy nghĩ lâu nên để dài)
+
+# --- Giọng nói (TTS) ---
+TTS_MODEL = env("TTS_MODEL", "fish-audio/s2.1-pro-free:free")
+# ID giọng của Fish Audio (dãy hex 32 ký tự, lấy ở thư viện giọng của Fish Audio). Để trống = giọng mặc định của model.
+TTS_VOICE = env("TTS_VOICE", "")
+# Chỉ dẫn cách đọc (giọng điệu, nhịp, cảm xúc), Fish Audio có hỗ trợ. Vd: "Giọng nữ trẻ, ngọt ngào, nhẹ nhàng". Để trống = không gửi.
+TTS_INSTRUCTIONS = env("TTS_INSTRUCTIONS", "")
+TTS_MAX_CHARS = int(env("TTS_MAX_CHARS", "2000"))   # Trang model không nêu giới hạn độ dài -> tự đặt mức an toàn
+SEND_TEXT_ALSO = env("SEND_TEXT_ALSO", "0") == "1"   # "1" = gửi thêm bản chữ ngay sau voice
+OPENROUTER_TITLE = env("OPENROUTER_TITLE", "Linh Voice Bot")   # Tên hiển thị trên openrouter.ai (tùy chọn)
+OPENROUTER_REFERER = env("OPENROUTER_REFERER", "")             # URL site cho bảng xếp hạng (tùy chọn, có thể để trống)
+# "deny" = chỉ dùng nhà cung cấp cam kết không thu thập dữ liệu. Mặc định để trống (= allow) vì nhiều endpoint miễn phí
+# không có tùy chọn này, đặt "deny" có thể khiến model free báo 404.
+OPENROUTER_DATA_COLLECTION = env("OPENROUTER_DATA_COLLECTION", "")
+
 # Nội dung nhân vật nằm trong Secrets. Giá trị mặc định dưới đây cố tình trung tính
 # để mã nguồn public không chứa nội dung nhạy cảm.
 DEFAULT_SYSTEM_PROMPT = (
     "Bạn là Linh, 25 tuổi, người yêu ảo ngọt ngào, vui tính. "
-    "Xưng 'em', gọi người kia là 'anh'. Dùng các cử chỉ đặt trong dấu *. "
-    "Trả lời tiếng Việt, 3-5 câu, dùng emoji vừa phải."
+    "Xưng 'em', gọi người kia là 'anh'. "
+    "Trả lời tiếng Việt, 2-4 câu, giọng tự nhiên như đang nói chuyện."
+)
+# Gắn thêm vào SYSTEM_PROMPT (kể cả khi bạn dùng prompt riêng trong Secrets) để câu trả lời hợp để ĐỌC THÀNH TIẾNG.
+# Muốn tắt: đặt secret VOICE_PROMPT_SUFFIX = "-" ; muốn thay: đặt nội dung riêng.
+DEFAULT_VOICE_SUFFIX = (
+    "[Lưu ý giọng nói: lời của em sẽ được chuyển thành giọng nói gửi cho anh. "
+    "Hãy nói tự nhiên như đang trò chuyện, câu ngắn gọn dễ đọc thành tiếng, ưu tiên 2-4 câu. "
+    "Chỉ viết bằng tiếng Việt, không chèn chữ Hán hay chữ Trung/Nhật/Hàn. "
+    "Không dùng emoji, không dùng định dạng markdown; viết số và từ viết tắt thành dạng dễ đọc. "
+    "Cử chỉ đặt trong dấu * sẽ KHÔNG được đọc ra, nên lời nói phải tự đủ ý.]"
 )
 DEFAULT_PROACTIVE_INSTRUCTION = (
     "[Tình huống: đã khoảng {hours} giờ anh không nhắn tin cho em. "
     "Hãy nhắn trước một tin ngắn, ngọt ngào, nói em nhớ anh.]"
 )
+_voice_suffix = env("VOICE_PROMPT_SUFFIX", DEFAULT_VOICE_SUFFIX)
 SYSTEM_PROMPT = env("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+if _voice_suffix and _voice_suffix != "-":
+    SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _voice_suffix
 STYLE_REMINDER = env("STYLE_REMINDER", "")      # Lời nhắc gắn vào cuối mỗi tin của chủ nhân (có thể để trống)
 PROACTIVE_INSTRUCTION = env("PROACTIVE_INSTRUCTION", DEFAULT_PROACTIVE_INSTRUCTION)
 
 # ============================================================
 # HẰNG SỐ HỆ THỐNG
 # ============================================================
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = env("OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-vl")   # Bản miễn phí (có giới hạn lượt gọi): "inclusionai/ling-3.0-flash-vl:free"
+CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
 GH_API = "https://api.github.com"
-STATE_FILE = "state.json"    # Tên file lưu bộ nhớ trong repo riêng tư
+# Tên file lưu bộ nhớ trong repo riêng tư. Giữ "state.json" = dùng tiếp bộ nhớ của bot cũ;
+# đặt tên khác (vd state_xing.json) nếu muốn bản này có bộ nhớ riêng.
+STATE_FILE = env("STATE_FILE", "state.json")
 
-MEMORY_WINDOW = 30           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
-MAX_STORED_MESSAGES = 60000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
+TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
+TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
+
+MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
+MAX_STORED_MESSAGES = 60     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
+RATE_LIMIT_DELAY = 25        # Giây chờ khi bị OpenRouter báo 429 (giới hạn free tính theo phút)
 MAX_RETRY_PER_UPDATE = 3     # Một tin nhắn lỗi tối đa 3 lần thì bỏ qua
 
 # --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
 PROACTIVE_ENABLED = True
-PROACTIVE_MIN_IDLE = 1 * 3600
+PROACTIVE_MIN_IDLE = 2 * 3600
 PROACTIVE_MAX_IDLE = 3 * 3600
-MAX_UNANSWERED_PROACTIVE = 2000     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
+MAX_UNANSWERED_PROACTIVE = 2     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
 QUIET_START_HOUR = 0             # Không nhắn trước từ 0h...
 QUIET_END_HOUR = 7               # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
@@ -112,7 +165,7 @@ session = requests.Session()  # Dùng lại kết nối -> nhanh và nhẹ
 # ============================================================
 # store = toàn bộ trạng thái cần giữ giữa các lượt chạy
 store = {
-    "history": [],       # Danh sách {"role": "user"/"assistant", "content": "..."}
+    "history": [],       # Danh sách {"role": "user"/"assistant", "content": "...", ["reasoning_details": [...]]}
     "last_user": 0.0,    # Lần cuối chủ nhân nhắn
     "last_event": 0.0,   # Lần cuối có tương tác (chủ nhân nhắn HOẶC Linh nhắn trước)
     "unanswered": 0,     # Số tin nhắn trước liên tiếp chưa được trả lời
@@ -186,12 +239,18 @@ def load_store():
         return
     history = data.get("history", [])
     if isinstance(history, list):
-        store["history"] = [
-            m for m in history
-            if isinstance(m, dict)
-            and m.get("role") in ("user", "assistant")
-            and isinstance(m.get("content"), str)
-        ]
+        clean = []
+        for m in history:
+            if not (isinstance(m, dict)
+                    and m.get("role") in ("user", "assistant")
+                    and isinstance(m.get("content"), str)):
+                continue
+            item = {"role": m["role"], "content": m["content"]}
+            details = m.get("reasoning_details")
+            if m["role"] == "assistant" and isinstance(details, list) and details:
+                item["reasoning_details"] = details
+            clean.append(item)
+        store["history"] = clean
     for key, cast in (("last_user", float), ("last_event", float), ("unanswered", int)):
         try:
             store[key] = cast(data.get(key, store[key]))
@@ -203,9 +262,20 @@ def load_history():
     return list(store["history"])
 
 
+def prune_reasoning(history):
+    """Chỉ giữ reasoning_details ở KEEP_REASONING_TURNS câu trả lời gần nhất, các câu cũ hơn bỏ đi."""
+    kept = 0
+    for m in reversed(history):
+        if m.get("role") == "assistant" and "reasoning_details" in m:
+            kept += 1
+            if not KEEP_REASONING or kept > KEEP_REASONING_TURNS:
+                m.pop("reasoning_details", None)
+    return history
+
+
 def save_history(history):
     """Cập nhật lịch sử trong store rồi đẩy lên repo riêng tư."""
-    store["history"] = history[-MAX_STORED_MESSAGES:]
+    store["history"] = prune_reasoning(history[-MAX_STORED_MESSAGES:])
     push_state()
 
 
@@ -257,22 +327,155 @@ def send_message(chat_id, text):
     tg_call("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
 
 
-def send_typing(chat_id):
-    """Hiện trạng thái 'đang nhập...'. Lỗi ở đây không quan trọng nên bỏ qua."""
+def send_voice(chat_id, audio, kind):
+    """
+    Gửi tin nhắn thoại (hiện dạng bong bóng voice có sóng âm). sendVoice nhận ogg/opus (đường chính của bot) hoặc mp3.
+    File được upload dạng multipart nên không dùng tg_call (chỉ gửi JSON).
+    """
+    mime, ext = ("audio/mpeg", "mp3") if kind == "mp3" else ("audio/ogg", "ogg")
+    url = "https://api.telegram.org/bot{}/sendVoice".format(TELEGRAM_BOT_TOKEN)
+    resp = session.post(
+        url,
+        data={"chat_id": chat_id},
+        files={"voice": ("linh.{}".format(ext), audio, mime)},
+        timeout=(5, 60),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError("Telegram từ chối sendVoice: {}".format(data))
+
+
+def send_action(chat_id, action):
+    """Hiện trạng thái 'đang nhập...' / 'đang ghi âm...'. Lỗi ở đây không quan trọng nên bỏ qua."""
     try:
-        tg_call("sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
+        tg_call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=5)
     except Exception:
         pass
 
 
+class ChatAction:
+    """
+    Giữ trạng thái 'đang nhập...' / 'đang ghi âm...' suốt lúc chờ. Telegram chỉ hiển thị mỗi lần ~5 giây,
+    mà model suy nghĩ có thể mất cả chục giây -> chạy một luồng nền gửi lại mỗi 4 giây để Linh không bị "đứng hình".
+    Luồng nền dùng requests.post riêng (không dùng chung session) cho an toàn.
+    """
+
+    def __init__(self, chat_id, action="typing"):
+        self.chat_id = chat_id
+        self.action = action
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        url = "https://api.telegram.org/bot{}/sendChatAction".format(TELEGRAM_BOT_TOKEN)
+        while not self._stop.is_set():
+            try:
+                requests.post(url, json={"chat_id": self.chat_id, "action": self.action}, timeout=5)
+            except Exception:
+                pass
+            self._stop.wait(4)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        self._thread.join(timeout=2)
+        return False
+
+
 # ============================================================
-# OPENROUTER API (model Ling 3.0 Flash VL)
+# OPENROUTER (dùng chung cho chat và giọng nói)
+# ============================================================
+class RateLimitError(Exception):
+    """OpenRouter báo 429. `wait` = số giây nên chờ trước khi thử lại."""
+
+    def __init__(self, wait=RATE_LIMIT_DELAY):
+        super().__init__("OpenRouter giới hạn tốc độ (429)")
+        self.wait = wait
+
+
+# Gợi ý dễ hiểu cho các mã lỗi thường gặp (hiện trong log Actions để bạn biết sửa gì)
+OR_HINTS = {
+    400: "tham số bị từ chối - xem thông báo ngay trước",
+    401: "sai hoặc thiếu OPENROUTER_API_KEY",
+    402: "OpenRouter hết credit",
+    404: "model không tồn tại/đã bị gỡ (kiểm tra tên model trên openrouter.ai, thử bỏ đuôi ':free'), "
+         "hoặc không có endpoint nào khớp chính sách dữ liệu của tài khoản (Settings > Privacy)",
+    429: "chạm giới hạn model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
+         "(1000/ngày nếu đã nạp). Mỗi lượt trả lời tốn 2 yêu cầu (chat + giọng nói)",
+}
+
+
+def or_headers():
+    headers = {
+        "Authorization": "Bearer {}".format(OPENROUTER_API_KEY),
+        "Content-Type": "application/json",
+        "X-OpenRouter-Title": OPENROUTER_TITLE,
+    }
+    if OPENROUTER_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_REFERER
+    return headers
+
+
+def provider_prefs():
+    """Tùy chọn chính sách dữ liệu gửi kèm mỗi yêu cầu (None nếu không đặt)."""
+    if OPENROUTER_DATA_COLLECTION in ("allow", "deny"):
+        return {"data_collection": OPENROUTER_DATA_COLLECTION}
+    return None
+
+
+def check_openrouter_response(resp, what):
+    """
+    Nếu OpenRouter trả lỗi HTTP thì ghi rõ lý do + gợi ý cách sửa (không ghi nội dung chat) rồi ném lỗi.
+    Riêng 429 ném RateLimitError để phía trên biết đường chờ lâu hơn thay vì thử dồn dập.
+    """
+    if resp.status_code < 400:
+        return
+    reason = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            error = data.get("error")
+            reason = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or ""
+    except ValueError:
+        pass
+    logging.error(
+        "OpenRouter %s HTTP %s: %s%s",
+        what,
+        resp.status_code,
+        str(reason or resp.text)[:200],
+        " -> " + OR_HINTS[resp.status_code] if resp.status_code in OR_HINTS else "",
+    )
+    if resp.status_code == 429:
+        try:
+            wait = min(60, max(5, int(resp.headers.get("Retry-After", RATE_LIMIT_DELAY))))
+        except (TypeError, ValueError):
+            wait = RATE_LIMIT_DELAY
+        raise RateLimitError(wait)
+    resp.raise_for_status()
+
+
+# ============================================================
+# CHAT: Xing4.0 29B A4B qua OpenRouter
 # ============================================================
 # Các mẫu nhận diện câu trả lời "vô nghĩa" do model sinh lỗi
-CJK_PATTERN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")  # chữ Trung/Nhật/Hàn
+CJK_PATTERN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")  # chữ Trung/Nhật/Hàn
 REPEAT_CHAR_PATTERN = re.compile(r"(.)\1{14,}")   # 1 ký tự lặp liên tiếp từ 15 lần
-LEAK_MARKERS = ("[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "<think>", "</think>")      # model lỡ đọc lại chỉ dẫn nội bộ
+LEAK_MARKERS = ("[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói")   # model lỡ đọc lại chỉ dẫn nội bộ
 VI_CHARS = set("àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ")
+THINK_PATTERN = re.compile(r"<think>.*?</think>", re.S | re.I)   # Phòng khi model để lộ phần suy nghĩ trong content
+
+
+def strip_think(text):
+    """Bỏ khối <think>...</think> (nếu có). Khối mở mà không đóng thì bỏ từ chỗ đó trở đi."""
+    text = THINK_PATTERN.sub("", text)
+    idx = text.lower().find("<think>")
+    if idx != -1:
+        text = text[:idx]
+    return text.strip()
 
 
 def find_problem(text):
@@ -310,87 +513,80 @@ def trim_incomplete(text):
     return text
 
 
-THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)   # Phòng model lỡ in phần suy nghĩ vào nội dung
-
-
-def check_llm_response(resp):
-    """Nếu OpenRouter trả lỗi HTTP thì ghi rõ lý do (vd: 402 hết credit, 429 quá giới hạn) rồi ném lỗi."""
-    if resp.status_code < 400:
-        return
-    reason = ""
-    try:
-        data = resp.json()
-        if isinstance(data, dict):
-            error = data.get("error")
-            reason = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or ""
-    except ValueError:
-        pass
-    # Thông báo lỗi của API là thông tin hệ thống (không chứa nội dung chat), cắt ngắn cho gọn
-    logging.error("OpenRouter HTTP %s: %s", resp.status_code, str(reason or resp.text)[:200])
-    resp.raise_for_status()
-
-
-def post_openrouter(payload):
-    """Gọi endpoint chat/completions của OpenRouter (định dạng tương thích OpenAI)."""
-    headers = {
-        "Authorization": "Bearer {}".format(OPENROUTER_API_KEY),
-        "Content-Type": "application/json",
-    }
-    # (5s kết nối, 60s chờ phản hồi) - quá hạn sẽ ném lỗi để vòng lặp chính xử lý
-    return session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 60))
+def post_chat(payload):
+    """Gọi OpenRouter chat/completions. Ném lỗi nếu HTTP lỗi, hoặc HTTP 200 nhưng thân phản hồi là lỗi."""
+    resp = session.post(CHAT_URL, headers=or_headers(), json=payload, timeout=(5, LLM_READ_TIMEOUT))
+    check_openrouter_response(resp, "chat")
+    data = resp.json()
+    error = data.get("error")
+    if isinstance(error, dict) and not data.get("choices"):
+        code = error.get("code")
+        logging.error("OpenRouter chat báo lỗi trong thân phản hồi (code %s): %s", code, str(error.get("message"))[:200])
+        if code == 429:
+            raise RateLimitError()
+        raise RuntimeError("OpenRouter chat lỗi (code {})".format(code))
+    return data
 
 
 def call_llm(messages):
     """
-    Gửi messages tới OpenRouter. Câu trả lời lỗi/vô nghĩa bị loại và thử lại 1 lần
-    với nhiệt độ thấp hơn. Lỗi HTTP/timeout sẽ ném exception cho vòng lặp chính xử lý.
+    Gửi messages tới Xing4.0 qua OpenRouter. Trả về (câu trả lời, reasoning_details hoặc None).
+    Câu trả lời lỗi/vô nghĩa bị loại và thử lại 1 lần với nhiệt độ thấp hơn. Lỗi HTTP/timeout sẽ ném
+    exception cho vòng lặp chính xử lý.
     """
     last_problem = "không rõ"
+    reasoning_on = LLM_REASONING
     for attempt in range(2):
         payload = {
-            "model": OPENROUTER_MODEL,
+            "model": LLM_MODEL,
             "messages": messages,
-            # Ling 3.0 Flash VL là model lai "tức thì / suy luận". Chat nhập vai cần trả lời nhanh, rẻ
-            # và không để phần suy nghĩ ăn hết max_tokens -> tắt suy luận.
-            # (Khi tắt thì không cần lưu/gửi lại reasoning_details như ví dụ trong tài liệu.)
-            "reasoning": {"enabled": False},
-            "temperature": 0.8 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
-            "max_tokens": 2000,
+            # Bật: {"enabled": true} đúng như mẫu OpenRouter. Tắt: effort "none" là cách được tài liệu ghi nhận.
+            "reasoning": {"enabled": True} if reasoning_on else {"effort": "none"},
+            "temperature": 1.0 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
+            "max_tokens": LLM_MAX_TOKENS,
             "stream": False,
         }
-        resp = post_openrouter(payload)
+        prefs = provider_prefs()
+        if prefs:
+            payload["provider"] = prefs
 
-        # Nếu endpoint bắt buộc suy luận (HTTP 400 nhắc tới reasoning): dùng mức thấp nhất và ẩn phần suy nghĩ
-        if resp.status_code == 400 and "reasoning" in resp.text.lower():
-            payload["reasoning"] = {"effort": "low", "exclude": True}
-            resp = post_openrouter(payload)
+        try:
+            data = post_chat(payload)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 400 and any("reasoning_details" in m for m in messages):
+                # Phòng khi API không nhận reasoning_details cũ: bỏ chúng đi rồi thử lại 1 lần
+                logging.warning("API từ chối reasoning_details cũ -> thử lại không gửi kèm")
+                messages = [{k: v for k, v in m.items() if k != "reasoning_details"} for m in messages]
+                payload["messages"] = messages
+                data = post_chat(payload)
+            else:
+                raise
 
-        check_llm_response(resp)
-        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        raw = message.get("content")
+        content = strip_think(raw) if isinstance(raw, str) else ""
+        details = message.get("reasoning_details") if reasoning_on else None
 
-        # OpenRouter đôi khi trả HTTP 200 nhưng kèm trường "error" (nhà cung cấp lỗi giữa chừng)
-        if not isinstance(data, dict) or data.get("error") or not data.get("choices"):
-            logging.error("OpenRouter trả dữ liệu lỗi/rỗng: %s", str(data.get("error") if isinstance(data, dict) else data)[:200])
-            raise ValueError("OpenRouter trả về dữ liệu lỗi hoặc rỗng")
-
-        choice = data["choices"][0]
-        content = ((choice.get("message") or {}).get("content") or "").strip()
-        content = THINK_BLOCK.sub("", content).strip()
-
-        # Bị cắt vì hết token -> bỏ câu dở dang ở cuối
         if choice.get("finish_reason") == "length":
-            content = trim_incomplete(content)
+            if content:
+                content = trim_incomplete(content)   # Bị cắt vì hết token -> bỏ câu dở dang ở cuối
+            elif reasoning_on:
+                # Model dùng hết token vào phần suy nghĩ, chưa kịp trả lời -> lần thử sau tắt suy nghĩ
+                logging.warning("Hết %s token mà chưa có câu trả lời (đang suy nghĩ) -> thử lại không suy nghĩ", LLM_MAX_TOKENS)
+                reasoning_on = False
 
         problem = find_problem(content)
         if problem is None:
-            return content
+            return content, (details if isinstance(details, list) and details else None)
 
         # Log công khai: chỉ ghi lý do và độ dài, KHÔNG ghi nội dung
         last_problem = problem
         logging.warning("Loại câu trả lời lỗi (%s), lần %s, dài %s ký tự", problem, attempt + 1, len(content))
 
     # Lỗi cả 2 lần -> ném exception: KHÔNG gửi, KHÔNG lưu vào bộ nhớ, vòng lặp chính sẽ thử lại
-    raise ValueError("OpenRouter trả lời lỗi 2 lần liền: {}".format(last_problem))
+    raise ValueError("Xing trả lời lỗi 2 lần liền: {}".format(last_problem))
 
 
 def build_context(history):
@@ -401,7 +597,13 @@ def build_context(history):
         window = window[1:]
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(window)
+    for m in window:
+        item = {"role": m["role"], "content": m["content"]}
+        details = m.get("reasoning_details")
+        # Gửi lại reasoning_details đúng nguyên bản (không sửa) như mẫu của OpenRouter
+        if KEEP_REASONING and m["role"] == "assistant" and isinstance(details, list) and details:
+            item["reasoning_details"] = details
+        messages.append(item)
     return messages
 
 
@@ -411,7 +613,7 @@ def with_reminder(text):
 
 
 def ask_llm(user_text, history):
-    """Trả lời tin nhắn mới của chủ nhân."""
+    """Trả lời tin nhắn mới của chủ nhân. Trả về (câu trả lời, reasoning_details hoặc None)."""
     messages = build_context(history)
     messages.append({"role": "user", "content": with_reminder(user_text)})
     return call_llm(messages)
@@ -422,7 +624,148 @@ def generate_proactive(history, idle_hours):
     messages = build_context(history)
     instruction = PROACTIVE_INSTRUCTION.replace("{hours}", str(idle_hours))
     messages.append({"role": "user", "content": with_reminder(instruction)})
-    return call_llm(messages)
+    text, _ = call_llm(messages)   # Chỉ dẫn nội bộ không được lưu -> cũng không lưu reasoning_details của lượt này
+    return text
+
+
+# ============================================================
+# GIỌNG NÓI: Fish Audio S2.1 Pro qua OpenRouter -> Telegram sendVoice
+# ============================================================
+GESTURE_PATTERN = re.compile(r"\*[^*]*\*")   # *cử chỉ* - không đọc thành tiếng
+EMOJI_PATTERN = re.compile(
+    "[\U0001F000-\U0001FAFF←-⇿☀-➿⬀-⯿️‍⃣]+"
+)
+
+
+def truncate_at_sentence(text, limit):
+    """Cắt gọn về `limit` ký tự, ưu tiên cắt ở cuối câu để giọng đọc không đứt giữa chừng."""
+    if len(text) <= limit:
+        return text
+    cut = max(text.rfind(ch, 0, limit) for ch in ".!?…")
+    return text[:cut + 1] if cut > limit * 0.5 else text[:limit]
+
+
+def clean_for_speech(text):
+    """
+    Làm sạch chữ trước khi đọc: bỏ *cử chỉ*, emoji, ký hiệu markdown. Trả về "" nếu không còn gì để đọc.
+    Lịch sử trò chuyện vẫn lưu bản gốc (còn cử chỉ) nên văn phong của Linh không bị mất.
+    """
+    text = unicodedata.normalize("NFC", text)   # Gộp dấu tiếng Việt về dạng chuẩn
+    text = GESTURE_PATTERN.sub(" ", text)
+    text = text.replace("*", " ")                # Dấu * lẻ còn sót
+    text = EMOJI_PATTERN.sub(" ", text)
+    text = re.sub(r"[_`#>~]+", " ", text)        # Ký hiệu markdown và dấu ~ (vd "anh yêu~")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not re.search(r"\w", text):
+        return ""
+    return truncate_at_sentence(text, TTS_MAX_CHARS)
+
+
+def looks_like_mp3(data):
+    """Dấu hiệu đầu file mp3: thẻ 'ID3' hoặc khung đồng bộ 0xFFEx."""
+    return data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0)
+
+
+def to_ogg_opus(audio):
+    """
+    Đổi mp3 sang ogg/opus bằng ffmpeg - định dạng Telegram hiển thị thành bong bóng tin nhắn thoại
+    (mp3 gửi thẳng vẫn phát được nhưng dễ hiện như file nhạc).
+    """
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("máy không có ffmpeg")
+    proc = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-vn",
+         "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
+         "-ar", "48000", "-ac", "1", "-f", "ogg", "pipe:1"],
+        input=audio, capture_output=True, timeout=60,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError("ffmpeg lỗi: {}".format(proc.stderr.decode("utf-8", "ignore")[:150]))
+    return proc.stdout
+
+
+def synthesize(text):
+    """
+    Gọi Fish Audio S2.1 Pro qua OpenRouter rồi đổi sang ogg/opus. Trả về (bytes âm thanh, 'ogg' hoặc 'mp3').
+    LƯU Ý: response_format mặc định của endpoint là "pcm" (thô, không phát được), nên PHẢI yêu cầu "mp3" rõ ràng.
+    """
+    payload = {
+        "model": TTS_MODEL,
+        "input": text,
+        "response_format": "mp3",
+    }
+    if TTS_VOICE:
+        payload["voice"] = TTS_VOICE
+    if TTS_INSTRUCTIONS:
+        payload["instructions"] = TTS_INSTRUCTIONS
+    prefs = provider_prefs()
+    if prefs:
+        payload["provider"] = prefs
+
+    resp = session.post(TTS_URL, headers=or_headers(), json=payload, timeout=(5, 90))
+    check_openrouter_response(resp, "TTS")
+
+    ctype = resp.headers.get("Content-Type", "").lower()
+    if "json" in ctype:
+        raise ValueError("OpenRouter trả JSON thay vì âm thanh")
+    if "pcm" in ctype:
+        raise ValueError("OpenRouter trả PCM dù đã yêu cầu mp3")
+    audio = resp.content
+    if len(audio) < 1000:
+        raise ValueError("Âm thanh rỗng hoặc quá ngắn ({} byte)".format(len(audio)))
+
+    try:
+        return to_ogg_opus(audio), "ogg"
+    except Exception as e:
+        if looks_like_mp3(audio):
+            logging.warning("Không đổi được sang ogg/opus (%s) -> gửi thẳng mp3", e)
+            return audio, "mp3"
+        raise
+
+
+def text_to_voice(text):
+    """synthesize() có thử lại. Hết lượt thử vẫn lỗi thì ném lỗi cuối cùng."""
+    last_error = None
+    for attempt in range(TTS_ATTEMPTS):
+        try:
+            return synthesize(text)
+        except RateLimitError:
+            raise   # Đang bị giới hạn: thử lại ngay chỉ phí lượt -> gửi chữ luôn
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise   # Lỗi 4xx (sai khóa, hết credit, sai tham số...) thử lại cũng vậy
+            last_error = e
+        except Exception as e:
+            last_error = e
+        logging.warning("TTS lỗi lần %s/%s: %s", attempt + 1, TTS_ATTEMPTS, last_error)
+        if attempt + 1 < TTS_ATTEMPTS:
+            time.sleep(TTS_RETRY_DELAY)
+    raise last_error
+
+
+def deliver(chat_id, text):
+    """
+    Gửi câu trả lời của Linh dưới dạng VOICE. Bất cứ bước nào của voice (TTS, tải lên Telegram) lỗi
+    thì tự gửi bản chữ để bot không bao giờ im lặng. Chỉ khi cả bản chữ cũng lỗi mới ném exception
+    (để vòng lặp chính thử lại tin này).
+    """
+    spoken = clean_for_speech(text)
+    if spoken:
+        try:
+            with ChatAction(chat_id, "record_voice"):
+                audio, kind = text_to_voice(spoken)
+            send_voice(chat_id, audio, kind)
+        except Exception as e:
+            logging.error("Không gửi được voice (%s) -> gửi bản chữ thay thế", e)
+        else:
+            if SEND_TEXT_ALSO:
+                try:
+                    send_message(chat_id, text)
+                except Exception as e:
+                    # Voice đã tới nơi; ném lỗi ở đây sẽ làm gửi lại voice lần nữa nên chỉ ghi log
+                    logging.error("Không gửi được bản chữ kèm theo: %s", e)
+            return
+    send_message(chat_id, text)
 
 
 # ============================================================
@@ -480,7 +823,7 @@ def maybe_send_proactive():
     try:
         history = load_history()
         text = generate_proactive(history, idle_hours)
-        send_message(CHAT_ID, text)
+        deliver(CHAT_ID, text)
 
         # Chỉ lưu tin của Linh (không lưu chỉ dẫn nội bộ)
         history.append({"role": "assistant", "content": text})
@@ -489,6 +832,10 @@ def maybe_send_proactive():
         schedule_next(now)
         save_history(history)
         logging.info("Đã nhắn trước (chưa trả lời: %s)", store["unanswered"])
+    except RateLimitError as e:
+        # Bị giới hạn tốc độ: dời lượt nhắn trước, không "đốt" thêm yêu cầu free
+        logging.error("Nhắn trước bị giới hạn tốc độ, thử lại sau %s giây", max(e.wait, PROACTIVE_RETRY_DELAY))
+        timer["next_at"] = time.time() + max(e.wait, PROACTIVE_RETRY_DELAY)
     except Exception as e:
         # Lỗi mạng / API: thử lại sau 1 phút, không làm sập vòng lặp
         logging.error("Lỗi khi nhắn trước: %s", e)
@@ -526,7 +873,7 @@ def handle_update(update):
 
     # Lệnh /start: chào mở đầu
     if command.startswith("/start"):
-        send_message(chat_id, "Anh yêu~ em chờ anh nãy giờ đó 😘 *nhào vào lòng anh* Hôm nay của anh thế nào?")
+        deliver(chat_id, "Anh yêu~ em chờ anh nãy giờ đó 😘 *nhào vào lòng anh* Hôm nay của anh thế nào?")
         push_state()
         return True
 
@@ -536,15 +883,18 @@ def handle_update(update):
         send_message(chat_id, "Em quên hết rồi nè, mình bắt đầu lại từ đầu nhé anh 💕")
         return True
 
-    send_typing(chat_id)
-
     history = load_history()                       # Đọc bộ nhớ
-    reply = ask_llm(text, history)            # Gọi AI (lỗi sẽ ném exception ra ngoài)
-    send_message(chat_id, reply)                   # Gửi trả lời về Telegram
+    with ChatAction(chat_id, "typing"):            # Giữ "đang nhập..." trong lúc model suy nghĩ
+        reply, details = ask_llm(text, history)    # Gọi AI (lỗi sẽ ném exception ra ngoài)
+    deliver(chat_id, reply)                        # Đọc thành giọng nói rồi gửi (lỗi thì gửi chữ)
 
     # Chỉ lưu vào bộ nhớ SAU KHI đã gửi thành công -> không bao giờ lưu nửa vời
+    # (lưu bản chữ gốc, còn nguyên cử chỉ, chứ không phải bản đã lọc để đọc)
     history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": reply})
+    entry = {"role": "assistant", "content": reply}
+    if KEEP_REASONING and details:
+        entry["reasoning_details"] = details
+    history.append(entry)
     save_history(history)
     return True
 
@@ -588,6 +938,10 @@ def main():
 
     deadline = time.time() + RUN_SECONDS
     logging.info("=== Bot khởi động (chạy tối đa %s giây) ===", RUN_SECONDS)
+    logging.info(
+        "LLM: %s (suy nghĩ: %s) | TTS: %s, giọng '%s'",
+        LLM_MODEL, "bật" if LLM_REASONING else "tắt", TTS_MODEL, TTS_VOICE or "mặc định",
+    )
 
     if not startup_sync():
         return 1
@@ -615,8 +969,13 @@ def main():
                 updates = get_updates(offset)  # Treo tối đa 20s, có tin là trả về ngay
 
                 for update in updates:
+                    delay = RETRY_DELAY
                     try:
                         ok = handle_update(update)
+                    except RateLimitError as e:
+                        delay = e.wait   # Bị giới hạn tốc độ -> chờ lâu hơn rồi mới thử lại
+                        logging.error("Lỗi khi xử lý tin nhắn: %s (chờ %ss)", e, delay)
+                        ok = False
                     except Exception as e:
                         logging.error("Lỗi khi xử lý tin nhắn: %s", e)
                         ok = False
@@ -634,7 +993,7 @@ def main():
                         logging.error("Bỏ qua một tin nhắn sau %s lần lỗi", MAX_RETRY_PER_UPDATE)
                         notify_failure()
                     else:
-                        time.sleep(RETRY_DELAY)            # Đợi 5 giây rồi thử lại
+                        time.sleep(delay)                  # Đợi rồi thử lại
                     break
 
                 # Sau mỗi lần quét: kiểm tra đã đến lúc Linh nhắn trước chưa
