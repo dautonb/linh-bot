@@ -63,6 +63,9 @@ KEEP_REASONING_TURNS = 2     # Chỉ giữ reasoning_details của 2 câu trả 
 # Token suy nghĩ TÍNH CHUNG vào max_tokens. Đặt thấp quá thì model dùng hết token để nghĩ và không còn gì để trả lời.
 LLM_MAX_TOKENS = int(env("LLM_MAX_TOKENS", "4096"))
 LLM_READ_TIMEOUT = int(env("LLM_READ_TIMEOUT", "150"))   # Giây chờ phản hồi (suy nghĩ lâu nên để dài)
+# Model dự phòng (cách nhau bằng dấu phẩy). Khi model chính lỗi, kể cả bị 429, OpenRouter tự chuyển sang model kế tiếp.
+# Chỉ liệt kê model đuôi ":free", nếu không OpenRouter sẽ tính tiền theo model thực sự được dùng. Để trống = không dự phòng.
+LLM_FALLBACK_MODELS = [m.strip() for m in env("LLM_FALLBACK_MODELS").split(",") if m.strip()]
 
 # --- Giọng nói (TTS) ---
 TTS_MODEL = env("TTS_MODEL", "fish-audio/s2.1-pro-free:free")
@@ -118,18 +121,19 @@ STATE_FILE = env("STATE_FILE", "state.json")
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 50           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
-MAX_STORED_MESSAGES = 60000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
+MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
+MAX_STORED_MESSAGES = 60     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
-RATE_LIMIT_DELAY = 25        # Giây chờ khi bị OpenRouter báo 429 (giới hạn free tính theo phút)
+RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
 MAX_RETRY_PER_UPDATE = 3     # Một tin nhắn lỗi tối đa 3 lần thì bỏ qua
+MAX_RETRY_BUSY = 6           # Riêng khi nhà cung cấp model quá tải (429 từ upstream) thì kiên nhẫn hơn: ~4 phút
 
 # --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
 PROACTIVE_ENABLED = True
-PROACTIVE_MIN_IDLE = 1 * 1800
-PROACTIVE_MAX_IDLE = 1 * 3600
-MAX_UNANSWERED_PROACTIVE = 20000     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
+PROACTIVE_MIN_IDLE = 2 * 3600
+PROACTIVE_MAX_IDLE = 3 * 3600
+MAX_UNANSWERED_PROACTIVE = 2     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
 QUIET_START_HOUR = 0             # Không nhắn trước từ 0h...
 QUIET_END_HOUR = 7               # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
@@ -390,11 +394,15 @@ class ChatAction:
 # OPENROUTER (dùng chung cho chat và giọng nói)
 # ============================================================
 class RateLimitError(Exception):
-    """OpenRouter báo 429. `wait` = số giây nên chờ trước khi thử lại."""
+    """
+    OpenRouter báo 429. `wait` = số giây nên chờ trước khi thử lại.
+    `upstream` = True nếu lỗi do NHÀ CUNG CẤP của model đang quá tải/giới hạn (không phải hạn mức tài khoản của bạn).
+    """
 
-    def __init__(self, wait=RATE_LIMIT_DELAY):
-        super().__init__("OpenRouter giới hạn tốc độ (429)")
+    def __init__(self, wait=RATE_LIMIT_DELAY, upstream=False):
+        super().__init__("OpenRouter báo 429 ({})".format("nhà cung cấp model quá tải" if upstream else "giới hạn tốc độ/hạn mức"))
         self.wait = wait
+        self.upstream = upstream
 
 
 # Gợi ý dễ hiểu cho các mã lỗi thường gặp (hiện trong log Actions để bạn biết sửa gì)
@@ -404,9 +412,16 @@ OR_HINTS = {
     402: "OpenRouter hết credit",
     404: "model không tồn tại/đã bị gỡ (kiểm tra tên model trên openrouter.ai, thử bỏ đuôi ':free'), "
          "hoặc không có endpoint nào khớp chính sách dữ liệu của tài khoản (Settings > Privacy)",
-    429: "chạm giới hạn model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
-         "(1000/ngày nếu đã nạp). Mỗi lượt trả lời tốn 2 yêu cầu (chat + giọng nói)",
 }
+# 429 có thể đến từ HAI nơi nên hai gợi ý khác nhau
+HINT_429_UPSTREAM = (
+    "nhà cung cấp của model đang quá tải hoặc tự giới hạn (KHÔNG phải hạn mức tài khoản của bạn; model free thường chỉ có "
+    "1 nhà cung cấp nên không có đường dự phòng). Bot tự chờ rồi thử lại; muốn né hẳn thì đặt LLM_FALLBACK_MODELS"
+)
+HINT_429_ACCOUNT = (
+    "chạm hạn mức của OpenRouter cho model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
+    "(1000/ngày nếu đã nạp). Mỗi lượt trả lời tốn 2 yêu cầu (chat + giọng nói)"
+)
 
 
 def or_headers():
@@ -427,6 +442,45 @@ def provider_prefs():
     return None
 
 
+def report_openrouter_error(what, status, error, fallback_text=""):
+    """
+    Ghi log một lỗi của OpenRouter (kèm gợi ý cách sửa) và trả về True nếu lỗi do NHÀ CUNG CẤP upstream gây ra.
+    Khối `error.metadata` cho biết nhà cung cấp nào và mã lỗi gốc của họ. Với 429/5xx (lỗi dung lượng, không
+    chứa nội dung chat) mới in thêm `raw`; lỗi 400 chỉ in thông điệp để chắc chắn không lộ nội dung vào log công khai.
+    """
+    reason, extra, upstream = str(fallback_text), "", False
+    if isinstance(error, dict):
+        reason = str(error.get("message") or fallback_text)
+        upstream = "provider returned error" in reason.lower()
+        meta = error.get("metadata")
+        if isinstance(meta, dict):
+            parts = []
+            for key in ("provider_name", "provider_code"):
+                if meta.get(key) not in (None, ""):
+                    parts.append("{}={}".format(key, meta[key]))
+            if status == 429 or status >= 500:
+                if meta.get("raw") not in (None, ""):
+                    parts.append("raw={}".format(str(meta["raw"])[:300]))
+            extra = ", ".join(parts)
+            upstream = upstream or bool(meta.get("provider_name"))
+    elif error:
+        reason = str(error)
+
+    if status == 429:
+        hint = HINT_429_UPSTREAM if upstream else HINT_429_ACCOUNT
+    else:
+        hint = OR_HINTS.get(status, "")
+    logging.error(
+        "OpenRouter %s HTTP %s: %s%s%s",
+        what,
+        status,
+        reason[:200],
+        " [" + extra + "]" if extra else "",
+        " -> " + hint if hint else "",
+    )
+    return upstream
+
+
 def check_openrouter_response(resp, what):
     """
     Nếu OpenRouter trả lỗi HTTP thì ghi rõ lý do + gợi ý cách sửa (không ghi nội dung chat) rồi ném lỗi.
@@ -434,27 +488,20 @@ def check_openrouter_response(resp, what):
     """
     if resp.status_code < 400:
         return
-    reason = ""
+    error = None
     try:
         data = resp.json()
         if isinstance(data, dict):
-            error = data.get("error")
-            reason = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or ""
+            error = data.get("error") or data.get("message")
     except ValueError:
         pass
-    logging.error(
-        "OpenRouter %s HTTP %s: %s%s",
-        what,
-        resp.status_code,
-        str(reason or resp.text)[:200],
-        " -> " + OR_HINTS[resp.status_code] if resp.status_code in OR_HINTS else "",
-    )
+    upstream = report_openrouter_error(what, resp.status_code, error, resp.text[:200])
     if resp.status_code == 429:
         try:
             wait = min(60, max(5, int(resp.headers.get("Retry-After", RATE_LIMIT_DELAY))))
         except (TypeError, ValueError):
             wait = RATE_LIMIT_DELAY
-        raise RateLimitError(wait)
+        raise RateLimitError(wait, upstream)
     resp.raise_for_status()
 
 
@@ -521,10 +568,14 @@ def post_chat(payload):
     error = data.get("error")
     if isinstance(error, dict) and not data.get("choices"):
         code = error.get("code")
-        logging.error("OpenRouter chat báo lỗi trong thân phản hồi (code %s): %s", code, str(error.get("message"))[:200])
-        if code == 429:
-            raise RateLimitError()
+        status = code if isinstance(code, int) else 502
+        upstream = report_openrouter_error("chat (lỗi trong thân phản hồi)", status, error)
+        if status == 429:
+            raise RateLimitError(RATE_LIMIT_DELAY, upstream)
         raise RuntimeError("OpenRouter chat lỗi (code {})".format(code))
+    used = data.get("model")
+    if LLM_FALLBACK_MODELS and used and used != LLM_MODEL:
+        logging.info("Lượt này model chính lỗi, đã dùng model dự phòng: %s", used)   # Tên model không nhạy cảm
     return data
 
 
@@ -546,6 +597,10 @@ def call_llm(messages):
             "max_tokens": LLM_MAX_TOKENS,
             "stream": False,
         }
+        if LLM_FALLBACK_MODELS:
+            # Theo tài liệu OpenRouter: danh sách theo thứ tự ưu tiên, model đầu lỗi (kể cả 429) thì thử model kế tiếp
+            del payload["model"]
+            payload["models"] = [LLM_MODEL] + LLM_FALLBACK_MODELS
         prefs = provider_prefs()
         if prefs:
             payload["provider"] = prefs
@@ -899,12 +954,24 @@ def handle_update(update):
     return True
 
 
-def notify_failure():
+def notify_failure(error=None):
     """Báo nhẹ cho chủ nhân khi một tin nhắn lỗi liên tục và bị bỏ qua."""
+    if isinstance(error, RateLimitError):
+        text = "Em đang bị nghẽn lượt nhắn nên chưa trả lời được, anh đợi vài phút rồi nhắn lại giúp em nhé 💋"
+    else:
+        text = "Em bị chập chờn sóng một chút, anh nhắn lại giúp em nhé 💋"
     try:
-        send_message(CHAT_ID, "Em bị chập chờn sóng một chút, anh nhắn lại giúp em nhé 💋")
+        send_message(CHAT_ID, text)
     except Exception as e:
         logging.error("Không gửi được thông báo lỗi: %s", e)
+
+
+def notify_busy():
+    """Báo một lần khi phải chờ lâu (nhà cung cấp model quá tải) để chủ nhân không tưởng bot đứng hình."""
+    try:
+        send_message(CHAT_ID, "Em đang hơi chậm một chút, anh đợi em xíu nhé 💕")
+    except Exception as e:
+        logging.error("Không gửi được thông báo chờ: %s", e)
 
 
 # ============================================================
@@ -942,6 +1009,11 @@ def main():
         "LLM: %s (suy nghĩ: %s) | TTS: %s, giọng '%s'",
         LLM_MODEL, "bật" if LLM_REASONING else "tắt", TTS_MODEL, TTS_VOICE or "mặc định",
     )
+    if LLM_FALLBACK_MODELS:
+        logging.info("Model dự phòng: %s", ", ".join(LLM_FALLBACK_MODELS))
+        for name in LLM_FALLBACK_MODELS:
+            if not name.endswith(":free"):
+                logging.warning("Model dự phòng '%s' không có đuôi ':free' -> có thể bị tính tiền", name)
 
     if not startup_sync():
         return 1
@@ -960,8 +1032,9 @@ def main():
     # Tiếp tục đồng hồ nhắn trước từ mốc tương tác cuối (đã lưu từ lượt chạy trước)
     schedule_next(store["last_event"] or time.time())
 
-    offset = None       # update_id kế tiếp cần lấy
-    fail_count = 0      # Số lần liên tiếp tin hiện tại bị lỗi
+    offset = None           # update_id kế tiếp cần lấy
+    fail_count = 0          # Số lần liên tiếp tin hiện tại bị lỗi
+    busy_notified = False   # Đã báo "em đang chậm" cho tin hiện tại chưa
 
     try:
         while time.time() < deadline:
@@ -970,11 +1043,12 @@ def main():
 
                 for update in updates:
                     delay = RETRY_DELAY
+                    limit_error = None   # Có giá trị nếu lần lỗi này là 429
                     try:
                         ok = handle_update(update)
                     except RateLimitError as e:
-                        delay = e.wait   # Bị giới hạn tốc độ -> chờ lâu hơn rồi mới thử lại
-                        logging.error("Lỗi khi xử lý tin nhắn: %s (chờ %ss)", e, delay)
+                        limit_error = e
+                        logging.error("Lỗi khi xử lý tin nhắn: %s", e)
                         ok = False
                     except Exception as e:
                         logging.error("Lỗi khi xử lý tin nhắn: %s", e)
@@ -983,16 +1057,26 @@ def main():
                     if ok:
                         offset = update["update_id"] + 1   # Xác nhận đã xử lý xong tin này
                         fail_count = 0
+                        busy_notified = False
                         continue
 
                     # Tin bị lỗi: giữ nguyên offset để lần quét sau lấy lại đúng tin này
                     fail_count += 1
-                    if fail_count >= MAX_RETRY_PER_UPDATE:
+                    busy = limit_error is not None and limit_error.upstream
+                    # Nhà cung cấp quá tải thường tự hết sau vài phút -> kiên nhẫn hơn (MAX_RETRY_BUSY lần) thay vì bỏ tin sớm
+                    max_tries = MAX_RETRY_BUSY if busy else MAX_RETRY_PER_UPDATE
+                    if limit_error is not None:
+                        delay = min(60, limit_error.wait * fail_count)   # Chờ lâu dần: 25s, 50s, 60s...
+                    if fail_count >= max_tries:
                         offset = update["update_id"] + 1   # Quá số lần thử -> bỏ qua tin này
                         fail_count = 0
-                        logging.error("Bỏ qua một tin nhắn sau %s lần lỗi", MAX_RETRY_PER_UPDATE)
-                        notify_failure()
+                        busy_notified = False
+                        logging.error("Bỏ qua một tin nhắn sau %s lần lỗi", max_tries)
+                        notify_failure(limit_error)
                     else:
+                        if busy and not busy_notified:
+                            busy_notified = True
+                            notify_busy()
                         time.sleep(delay)                  # Đợi rồi thử lại
                     break
 
