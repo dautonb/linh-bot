@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-bot.py - Linh Voice Bot (bản Xing + HeyGen) chạy trên GitHub Actions (Long Polling).
+bot.py - Linh Voice Bot (bản Nemotron + HeyGen) chạy trên GitHub Actions (Long Polling).
 
-Bản VOICE: Xing4.0 29B A4B (dự phòng Ling 3.0 Flash) viết câu trả lời -> HeyGen Voice Turbo đọc thành giọng nói (PCM)
+Bản VOICE: Nemotron 3 Ultra (dự phòng Ling 3.0 Flash) viết câu trả lời -> HeyGen Voice Turbo đọc thành giọng nói (PCM)
 -> đổi sang ogg/opus bằng ffmpeg -> gửi vào Telegram bằng sendVoice.
 CẢ HAI model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
 TTS hoặc gửi voice lỗi thì tự gửi chữ, bot không bao giờ im lặng.
@@ -45,7 +45,7 @@ def env(name, default=""):
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 CHAT_ID = env("CHAT_ID")
-OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")  # MỘT khóa OpenRouter dùng cho cả chat (Xing) lẫn giọng nói (HeyGen)
+OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")  # MỘT khóa OpenRouter dùng cho cả chat (Nemotron) lẫn giọng nói (HeyGen)
 STATE_REPO = env("STATE_REPO")                  # Dạng "ten-github/linh-bot-data" (repo RIÊNG TƯ)
 STATE_REPO_TOKEN = env("STATE_REPO_TOKEN")      # Token quyền Contents: Read and write cho repo đó
 
@@ -53,16 +53,17 @@ RUN_SECONDS = int(env("RUN_SECONDS", "20400"))  # Thời gian chạy mỗi lư�
 TZ_OFFSET_HOURS = float(env("TZ_OFFSET_HOURS", "7"))  # Múi giờ để tính giờ yên lặng (VN = +7)
 
 # --- Chat (LLM) ---
-LLM_MODEL = env("LLM_MODEL", "xingchen-agi/xing4.0-29b-a4b:free")
-# Xing4.0 BẬT sẵn chế độ suy nghĩ (reasoning). "1" = bật như mẫu của OpenRouter (trả lời chất lượng hơn nhưng chậm hơn:
-# model chạy khoảng 46 token/giây nên mỗi lượt suy nghĩ có thể tốn vài chục giây). "0" = tắt hẳn cho nhanh.
+LLM_MODEL = env("LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+# "1" = bật suy nghĩ (reasoning) như mẫu của OpenRouter: trả lời chất lượng hơn nhưng chậm hơn (Nemotron 3 Ultra chạy
+# khoảng 33 token/giây nên mỗi lượt suy nghĩ có thể tốn vài chục giây). "0" = thử tắt cho nhanh: nếu model không cho tắt
+# (trả 400) thì bot tự bỏ tham số và để model chạy theo mặc định.
 LLM_REASONING = env("LLM_REASONING", "1") == "1"
 # "1" = lưu reasoning_details của vài câu trả lời gần nhất và gửi lại đúng nguyên bản ở lượt sau (như mẫu của OpenRouter).
 KEEP_REASONING = env("KEEP_REASONING", "1") == "1"
 KEEP_REASONING_TURNS = 2     # Chỉ giữ reasoning_details của 2 câu trả lời gần nhất -> file bộ nhớ không phình to
 # Token suy nghĩ TÍNH CHUNG vào max_tokens. Đặt thấp quá thì model dùng hết token để nghĩ và không còn gì để trả lời.
 LLM_MAX_TOKENS = int(env("LLM_MAX_TOKENS", "4096"))
-LLM_READ_TIMEOUT = int(env("LLM_READ_TIMEOUT", "150"))   # Giây chờ phản hồi (suy nghĩ lâu nên để dài)
+LLM_READ_TIMEOUT = int(env("LLM_READ_TIMEOUT", "180"))   # Giây chờ phản hồi (4096 token ở 33 token/giây ~ 125s nên để dư)
 # Model dự phòng (cách nhau bằng dấu phẩy, thử theo thứ tự). Khi model chính lỗi, kể cả bị 429, OpenRouter tự chuyển sang
 # model kế tiếp. Model không có đuôi ":free" sẽ bị tính tiền (cần credit) theo model thực sự được dùng. Để trống = không dự phòng.
 # Bản workflow đặt sẵn: inclusionai/ling-3.0-flash:free rồi tới inclusionai/ling-3.0-flash (trả phí, rất rẻ).
@@ -126,14 +127,14 @@ CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
 GH_API = "https://api.github.com"
 # Tên file lưu bộ nhớ trong repo riêng tư. Giữ "state.json" = dùng tiếp bộ nhớ của bot cũ;
-# đặt tên khác (vd state_xing.json) nếu muốn bản này có bộ nhớ riêng.
+# đặt tên khác (vd state_nemotron.json) nếu muốn bản này có bộ nhớ riêng.
 STATE_FILE = env("STATE_FILE", "state.json")
 
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 20           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
-MAX_STORED_MESSAGES = 60000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
+MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
+MAX_STORED_MESSAGES = 60     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
 RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
@@ -142,9 +143,9 @@ MAX_RETRY_BUSY = 6           # Riêng khi nhà cung cấp model quá tải (429 
 
 # --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
 PROACTIVE_ENABLED = True
-PROACTIVE_MIN_IDLE = 1 * 3600
-PROACTIVE_MAX_IDLE = 1 * 3800
-MAX_UNANSWERED_PROACTIVE = 2000     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
+PROACTIVE_MIN_IDLE = 2 * 3600
+PROACTIVE_MAX_IDLE = 3 * 3600
+MAX_UNANSWERED_PROACTIVE = 2     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
 QUIET_START_HOUR = 0             # Không nhắn trước từ 0h...
 QUIET_END_HOUR = 7               # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
@@ -519,7 +520,7 @@ def check_openrouter_response(resp, what):
 
 
 # ============================================================
-# CHAT: Xing4.0 29B A4B qua OpenRouter
+# CHAT: Nemotron 3 Ultra (dự phòng Ling 3.0 Flash) qua OpenRouter
 # ============================================================
 # Các mẫu nhận diện câu trả lời "vô nghĩa" do model sinh lỗi
 CJK_PATTERN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")  # chữ Trung/Nhật/Hàn
@@ -592,9 +593,25 @@ def post_chat(payload):
     return data
 
 
+# Khả năng của model, học được trong lúc chạy. Có model (hoặc nhà cung cấp) không cho tắt suy nghĩ và trả 400 khi
+# nhận effort "none"; biết rồi thì các lượt sau bỏ hẳn tham số reasoning thay vì tốn thêm một lượt gọi bị từ chối.
+llm_caps = {"cannot_disable_reasoning": False}
+
+
+def reasoning_param(on):
+    """Tham số `reasoning` gửi lên. Bật: {"enabled": true} đúng như mẫu OpenRouter. Tắt: effort "none" (cách tài liệu ghi nhận).
+    Trả về None (= không gửi tham số) nếu model đã được biết là không cho tắt."""
+    if on:
+        return {"enabled": True}
+    if llm_caps["cannot_disable_reasoning"]:
+        return None
+    return {"effort": "none"}
+
+
 def call_llm(messages):
     """
-    Gửi messages tới Xing4.0 qua OpenRouter. Trả về (câu trả lời, reasoning_details hoặc None).
+    Gửi messages tới model chat (Nemotron 3 Ultra, dự phòng Ling 3.0 Flash) qua OpenRouter.
+    Trả về (câu trả lời, reasoning_details hoặc None).
     Câu trả lời lỗi/vô nghĩa bị loại và thử lại 1 lần với nhiệt độ thấp hơn. Lỗi HTTP/timeout sẽ ném
     exception cho vòng lặp chính xử lý.
     """
@@ -604,12 +621,13 @@ def call_llm(messages):
         payload = {
             "model": LLM_MODEL,
             "messages": messages,
-            # Bật: {"enabled": true} đúng như mẫu OpenRouter. Tắt: effort "none" là cách được tài liệu ghi nhận.
-            "reasoning": {"enabled": True} if reasoning_on else {"effort": "none"},
             "temperature": 1.0 if attempt == 0 else 0.7,   # Lần thử lại hạ nhiệt độ cho ổn định
             "max_tokens": LLM_MAX_TOKENS,
             "stream": False,
         }
+        reasoning = reasoning_param(reasoning_on)
+        if reasoning is not None:
+            payload["reasoning"] = reasoning
         if LLM_FALLBACK_MODELS:
             # Theo tài liệu OpenRouter: danh sách theo thứ tự ưu tiên, model đầu lỗi (kể cả 429) thì thử model kế tiếp
             del payload["model"]
@@ -618,24 +636,33 @@ def call_llm(messages):
         if prefs:
             payload["provider"] = prefs
 
-        try:
-            data = post_chat(payload)
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status == 400 and any("reasoning_details" in m for m in messages):
-                # Phòng khi API không nhận reasoning_details cũ: bỏ chúng đi rồi thử lại 1 lần
-                logging.warning("API từ chối reasoning_details cũ -> thử lại không gửi kèm")
-                messages = [{k: v for k, v in m.items() if k != "reasoning_details"} for m in messages]
-                payload["messages"] = messages
+        # Lỗi 400 có thể do hai tham số tùy chọn bị model từ chối: reasoning_details cũ, hoặc effort "none".
+        # Mỗi thứ chỉ được sửa một lần rồi gọi lại; lỗi 400 khác thì ném ra như bình thường.
+        for _ in range(3):
+            try:
                 data = post_chat(payload)
-            else:
-                raise
+                break
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 400 and any("reasoning_details" in m for m in messages):
+                    logging.warning("API từ chối reasoning_details cũ -> thử lại không gửi kèm")
+                    messages = [{k: v for k, v in m.items() if k != "reasoning_details"} for m in messages]
+                    payload["messages"] = messages
+                elif status == 400 and payload.get("reasoning") == {"effort": "none"}:
+                    logging.warning("Model không cho tắt suy nghĩ (effort none bị từ chối) -> bỏ tham số reasoning, nhớ cho các lượt sau")
+                    llm_caps["cannot_disable_reasoning"] = True
+                    payload.pop("reasoning")
+                else:
+                    raise
+        else:
+            raise RuntimeError("Yêu cầu chat vẫn bị từ chối sau khi đã sửa tham số")
 
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         raw = message.get("content")
         content = strip_think(raw) if isinstance(raw, str) else ""
-        details = message.get("reasoning_details") if reasoning_on else None
+        # Chỉ lấy reasoning_details khi đang bật suy nghĩ, hoặc khi không gửi tham số reasoning (model tự suy nghĩ theo mặc định)
+        details = message.get("reasoning_details") if (reasoning_on or "reasoning" not in payload) else None
 
         if choice.get("finish_reason") == "length":
             if content:
@@ -654,7 +681,7 @@ def call_llm(messages):
         logging.warning("Loại câu trả lời lỗi (%s), lần %s, dài %s ký tự", problem, attempt + 1, len(content))
 
     # Lỗi cả 2 lần -> ném exception: KHÔNG gửi, KHÔNG lưu vào bộ nhớ, vòng lặp chính sẽ thử lại
-    raise ValueError("Xing trả lời lỗi 2 lần liền: {}".format(last_problem))
+    raise ValueError("Model trả lời lỗi 2 lần liền: {}".format(last_problem))
 
 
 def build_context(history):
