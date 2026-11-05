@@ -1,4 +1,4 @@
-name: Linh Voice Bot (Dots)
+name: Linh Voice Bot (Crouton + ảnh Gemini)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -11,7 +11,7 @@ on:
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
 # nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-voice-bot
+  group: linh-crouton-bot
   cancel-in-progress: false
 
 permissions:
@@ -27,30 +27,36 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # MỘT khóa OpenRouter dùng cho cả LLM (Dots3-Note) lẫn giọng nói HeyGen
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # Một khóa OpenRouter dùng cho cả Crouton Alpha (chat) lẫn HeyGen (giọng nói)
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}           # Khóa aistudio.google.com để tạo ảnh (TÙY CHỌN: không có secret này thì tắt ảnh)
+      LINH_APPEARANCE: ${{ secrets.LINH_APPEARANCE }}         # Mô tả ngoại hình cố định của Linh để ảnh nhất quán (TÙY CHỌN)
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-      # --- Cấu hình LLM (không nhạy cảm nên để thẳng ở đây) ---
-      # Model chính. Bản :free của Dots3-Note hiện hiển thị "sẽ gỡ ngày 31/12/2026" -> sau đó đổi sang model khác
-      LLM_MODEL: "dots-studio/dots-3-note-preview:free"
-      # Model free dự phòng, thử lần lượt khi model chính lỗi (đặt "-" để tắt). Model free hay bị gỡ/đổi:
-      # xem danh sách mới nhất ở https://openrouter.ai/collections/free-models
-      LLM_FALLBACK_MODELS: "thinkingmachines/inkling:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/free"
-      LLM_REASONING: "1"          # "1" = bật reasoning; "0" = tắt nếu thấy trả lời chậm
-      LLM_MAX_TOKENS: "3000"      # Token suy luận cũng tính vào hạn mức này
-      LLM_TIMEOUT: "60"           # Giây chờ tối đa cho mỗi model
-      LLM_TOTAL_BUDGET: "150"     # Tổng giây tối đa cho cả chuỗi model trước khi bỏ cuộc lượt này
+      # --- Cấu hình chat (không nhạy cảm nên để thẳng ở đây) ---
+      # Crouton Alpha là model stealth: nhà phát triển ẩn danh, nhà cung cấp có thể lưu nội dung chat, OpenRouter có thể gỡ bất cứ lúc nào
+      LLM_MODEL: "stealth/crouton-alpha"
+      LLM_MAX_TOKENS: "4000"      # Token suy luận tính vào mức này, đừng đặt quá thấp (câu trả lời sẽ rỗng)
+      REASONING_ENABLED: "1"
+      REASONING_EFFORT: ""        # Tùy chọn: low / medium / high (bỏ trống = mặc định của model)
+      KEEP_REASONING_TURNS: "1"   # Số câu trả lời gần nhất giữ lại reasoning_details gửi lại cho model (0 = không giữ)
+      # --- Cấu hình ảnh Gemini ---
+      IMAGE_MODEL: "gemini-3.1-flash-lite-image"   # Hoặc gemini-3.1-flash-image / gemini-3-pro-image / gemini-2.5-flash-image
+      IMAGE_ASPECT: "3:4"         # Để trống nếu model báo lỗi tham số này
+      IMAGE_AUTO: "1"             # "1" = Linh tự quyết định lúc nào gửi ảnh; "0" = chỉ gửi khi bạn gõ /anh
+      IMAGE_MAX_PER_DAY: "10"     # Trần số ảnh mỗi ngày, chống tốn tiền ngoài ý muốn nếu bạn bật thanh toán (0 = không giới hạn)
+      IMAGE_COOLDOWN_MIN: "30"    # Hết lượt (429) thì nghỉ thử ảnh bao nhiêu phút
+      IMAGE_FAIL_NOTE: ""         # Tin chữ gửi thêm khi ảnh không tạo được (trống = chỉ gửi chữ/voice như bình thường)
       # --- Cấu hình giọng nói ---
       # Bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo" (trả phí, cần nạp credit)
       TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
-      # Giọng có sẵn: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
-      TTS_VOICE: "sabrina"
+      # Giọng: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+      TTS_VOICE: "nadine"
       TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # STATE_FILE: "state_voice.json"   # Bỏ comment nếu muốn bản voice có bộ nhớ riêng, không dùng chung với bot cũ
+      # STATE_FILE: "state_crouton.json"   # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung với bot cũ
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
