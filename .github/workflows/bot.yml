@@ -1,4 +1,4 @@
-name: Linh Voice Bot
+name: Linh Voice Bot (Mistral)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -27,41 +27,44 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      # MỘT khóa OpenRouter dùng cho cả chat (Nemotron) lẫn giọng nói (HeyGen). KHÔNG còn cần DEEPSEEK_API_KEY.
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # MỘT khóa OpenRouter dùng cho cả LLM (Mistral Nemo) lẫn giọng nói HeyGen (cần có credit vì Nemo là model trả phí)
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}           # Khóa từ aistudio.google.com để tạo ảnh (KHÔNG bắt buộc: thiếu thì bot chỉ gửi voice/chữ)
+      IMAGE_CHARACTER: ${{ secrets.IMAGE_CHARACTER }}         # (Tùy chọn) mô tả ngoại hình Linh bằng tiếng Anh để ảnh nhất quán; để trống = dùng mô tả mặc định
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-
-      # --- Chat (không nhạy cảm nên để thẳng ở đây) ---
-      LLM_MODEL: "nvidia/nemotron-3-ultra-550b-a55b:free"
-      # "1" = bật suy nghĩ (chất lượng hơn nhưng chậm, ~33 token/giây nên có thể vài chục giây/lượt); "0" = thử tắt cho nhanh
-      # (nếu model không cho tắt thì bot tự bỏ tham số và để model chạy mặc định)
-      LLM_REASONING: "1"
-      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (như mẫu OpenRouter)
-      LLM_MAX_TOKENS: "4096"      # Token suy nghĩ tính chung vào mức này; đặt thấp quá thì model nghĩ xong là hết token
-      # Model dự phòng, cách nhau bằng dấu phẩy, thử theo thứ tự: khi Nemotron bị 429/lỗi thì OpenRouter tự chuyển sang model kế tiếp.
-      #  1) Ling 3.0 Flash bản :free (miễn phí, chung hạn mức free của tài khoản)
-      #  2) Ling 3.0 Flash bản trả phí (rất rẻ: ~$0,021 vào / $0,063 ra mỗi triệu token, có thể thay đổi; có 2 nhà cung cấp nên ổn định hơn).
-      #     Bản này CẦN có credit trong tài khoản OpenRouter, chưa nạp thì sẽ báo lỗi 402 (hết credit).
-      # Muốn chỉ dùng miễn phí: xóa phần ",inclusionai/ling-3.0-flash". Để trống hoàn toàn = không dự phòng.
-      LLM_FALLBACK_MODELS: "inclusionai/ling-3.0-flash:free,inclusionai/ling-3.0-flash"
-
-      # --- Giọng nói ---
-      # Theo ghi chú ở bản cũ, bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo"
-      # (trả phí, khoảng $4/triệu ký tự, cần nạp credit). Muốn dùng Fish Audio: "fish-audio/s2.1-pro-free:free" (kèm đổi TTS_VOICE).
+      # --- Cấu hình LLM (không nhạy cảm nên để thẳng ở đây) ---
+      # Dùng hoàn toàn Mistral Nemo. Đây là model TRẢ PHÍ (khoảng 0,02 USD/1 triệu token vào, 0,03 USD/1 triệu token ra)
+      # nên tài khoản OpenRouter cần có credit; đổi lại không bị hạn mức 50 lượt/ngày của model ":free".
+      LLM_MODEL: "mistralai/mistral-nemo"
+      # Model dự phòng (tùy chọn, ngăn cách bằng dấu phẩy). Để trống = chỉ dùng Mistral Nemo.
+      # Muốn thêm dự phòng cùng hãng Mistral: điền ID lấy ở https://openrouter.ai/mistralai
+      LLM_FALLBACK_MODELS: ""
+      LLM_REASONING: "0"          # Mistral Nemo không có reasoning -> để "0"
+      LLM_MAX_TOKENS: "800"       # Trần độ dài mỗi câu trả lời
+      LLM_TEMPERATURE: "0.8"      # Nemo dễ lặp/lạc khi nhiệt độ cao; hạ xuống 0.6-0.7 nếu thấy trả lời lộn xộn
+      LLM_ATTEMPTS: "2"           # Số lần thử khi câu trả lời bị loại (vô nghĩa/rỗng); lần sau tự hạ nhiệt độ
+      LLM_TIMEOUT: "60"           # Giây chờ tối đa cho mỗi model
+      LLM_TOTAL_BUDGET: "150"     # Tổng giây tối đa cho cả chuỗi model trước khi bỏ cuộc lượt này
+      # --- Cấu hình ảnh (Google AI Studio / Gemini). Hết lượt hoặc lỗi thì bot CHỈ gửi chữ ---
+      IMAGE_ENABLED: "1"          # "0" = tắt hẳn tính năng ảnh
+      # Model ảnh thử lần lượt. Nhiều tài khoản miễn phí không có lượt tạo ảnh (cần bật thanh toán) -> khi đó bot tự chỉ gửi chữ.
+      # Xem hạn mức thật ở https://aistudio.google.com/rate-limit và ID model ở ai.google.dev/gemini-api/docs/image-generation
+      IMAGE_MODELS: "gemini-3.1-flash-image,gemini-3.1-flash-lite-image,gemini-nano-banana-2.1"
+      IMAGE_ASPECT: "3:4"         # Tỉ lệ ảnh (3:4 = dọc như selfie); "-" = để model tự chọn
+      IMAGE_DAILY_LIMIT: "10"     # Tối đa ảnh mỗi ngày (giờ VN) để khỏi tốn tiền ngoài ý muốn; "0" = không giới hạn
+      IMAGE_TIMEOUT: "60"         # Giây chờ tối đa cho mỗi model ảnh
+      IMAGE_TOTAL_BUDGET: "100"   # Tổng giây tối đa cho việc tạo 1 ảnh
+      # --- Cấu hình giọng nói ---
+      # Bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo" (trả phí, cần nạp credit)
       TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
-      # Giọng HeyGen: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent.
-      # Giọng PHẢI khớp với model (Fish Audio dùng ID hex 32 ký tự, hoặc để trống = mặc định).
-      TTS_VOICE: "nadine"
+      # Giọng có sẵn: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+      TTS_VOICE: "sabrina"
       TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
-      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (chỉ Fish Audio hỗ trợ, HeyGen bỏ qua). Để trống = không gửi
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
-      # STATE_FILE: "state_nemotron.json"    # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung state.json của bot cũ
-
+      # STATE_FILE: "state_voice.json"   # Bỏ comment nếu muốn bản voice có bộ nhớ riêng, không dùng chung với bot cũ
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
@@ -80,8 +83,8 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
-      # (thiếu ffmpeg thì bot gửi bản chữ). Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
+      # BẮT BUỘC: HeyGen Voice chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được.
+      # Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
       - name: Cài ffmpeg
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
