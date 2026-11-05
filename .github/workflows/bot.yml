@@ -1,4 +1,4 @@
-name: Linh Voice Bot (Crouton + ảnh Gemini)
+name: Linh Voice Bot
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -11,7 +11,7 @@ on:
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
 # nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-crouton-bot
+  group: linh-voice-bot
   cancel-in-progress: false
 
 permissions:
@@ -27,36 +27,39 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # Một khóa OpenRouter dùng cho cả Crouton Alpha (chat) lẫn HeyGen (giọng nói)
-      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}           # Khóa aistudio.google.com để tạo ảnh (TÙY CHỌN: không có secret này thì tắt ảnh)
-      LINH_APPEARANCE: ${{ secrets.LINH_APPEARANCE }}         # Mô tả ngoại hình cố định của Linh để ảnh nhất quán (TÙY CHỌN)
+      # MỘT khóa OpenRouter dùng cho cả chat (Xing4.0) lẫn giọng nói (Fish Audio). KHÔNG còn cần DEEPSEEK_API_KEY.
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-      # --- Cấu hình chat (không nhạy cảm nên để thẳng ở đây) ---
-      # Crouton Alpha là model stealth: nhà phát triển ẩn danh, nhà cung cấp có thể lưu nội dung chat, OpenRouter có thể gỡ bất cứ lúc nào
-      LLM_MODEL: "stealth/crouton-alpha"
-      LLM_MAX_TOKENS: "4000"      # Token suy luận tính vào mức này, đừng đặt quá thấp (câu trả lời sẽ rỗng)
-      REASONING_ENABLED: "1"
-      REASONING_EFFORT: ""        # Tùy chọn: low / medium / high (bỏ trống = mặc định của model)
-      KEEP_REASONING_TURNS: "1"   # Số câu trả lời gần nhất giữ lại reasoning_details gửi lại cho model (0 = không giữ)
-      # --- Cấu hình ảnh Gemini ---
-      IMAGE_MODEL: "gemini-3.1-flash-lite-image"   # Hoặc gemini-3.1-flash-image / gemini-3-pro-image / gemini-2.5-flash-image
-      IMAGE_ASPECT: "3:4"         # Để trống nếu model báo lỗi tham số này
-      IMAGE_AUTO: "1"             # "1" = Linh tự quyết định lúc nào gửi ảnh; "0" = chỉ gửi khi bạn gõ /anh
-      IMAGE_MAX_PER_DAY: "10"     # Trần số ảnh mỗi ngày, chống tốn tiền ngoài ý muốn nếu bạn bật thanh toán (0 = không giới hạn)
-      IMAGE_COOLDOWN_MIN: "30"    # Hết lượt (429) thì nghỉ thử ảnh bao nhiêu phút
-      IMAGE_FAIL_NOTE: ""         # Tin chữ gửi thêm khi ảnh không tạo được (trống = chỉ gửi chữ/voice như bình thường)
-      # --- Cấu hình giọng nói ---
-      # Bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo" (trả phí, cần nạp credit)
+
+      # --- Chat (không nhạy cảm nên để thẳng ở đây) ---
+      LLM_MODEL: "xingchen-agi/xing4.0-29b-a4b:free"
+      LLM_REASONING: "1"          # "1" = bật suy nghĩ (chất lượng hơn nhưng chậm, có thể vài chục giây/lượt); "0" = tắt cho nhanh
+      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (như mẫu OpenRouter)
+      LLM_MAX_TOKENS: "4096"      # Token suy nghĩ tính chung vào mức này; đặt thấp quá thì model nghĩ xong là hết token
+      # Model dự phòng, cách nhau bằng dấu phẩy, thử theo thứ tự: khi Xing bị 429/lỗi thì OpenRouter tự chuyển sang model kế tiếp.
+      #  1) Ling 3.0 Flash bản :free (miễn phí, chung hạn mức free của tài khoản)
+      #  2) Ling 3.0 Flash bản trả phí (rất rẻ: ~$0,021 vào / $0,063 ra mỗi triệu token, có thể thay đổi; có 2 nhà cung cấp nên ổn định hơn).
+      #     Bản này CẦN có credit trong tài khoản OpenRouter, chưa nạp thì sẽ báo lỗi 402 (hết credit).
+      # Muốn chỉ dùng miễn phí: xóa phần ",inclusionai/ling-3.0-flash". Để trống hoàn toàn = không dự phòng.
+      LLM_FALLBACK_MODELS: "inclusionai/ling-3.0-flash:free,inclusionai/ling-3.0-flash"
+
+      # --- Giọng nói ---
+      # Theo ghi chú ở bản cũ, bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo"
+      # (trả phí, khoảng $4/triệu ký tự, cần nạp credit). Muốn dùng Fish Audio: "fish-audio/s2.1-pro-free:free" (kèm đổi TTS_VOICE).
       TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
-      # Giọng: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+      # Giọng HeyGen: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent.
+      # Giọng PHẢI khớp với model (Fish Audio dùng ID hex 32 ký tự, hoặc để trống = mặc định).
       TTS_VOICE: "nadine"
       TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
+      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (chỉ Fish Audio hỗ trợ, HeyGen bỏ qua). Để trống = không gửi
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # STATE_FILE: "state_crouton.json"   # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung với bot cũ
+      # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
+      # STATE_FILE: "state_xing.json"        # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung state.json của bot cũ
+
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
@@ -75,8 +78,8 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      # BẮT BUỘC: HeyGen Voice chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được.
-      # Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
+      # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
+      # (thiếu ffmpeg thì bot gửi bản chữ). Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
       - name: Cài ffmpeg
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
