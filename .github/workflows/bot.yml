@@ -1,4 +1,4 @@
-name: Linh Voice Bot (Mistral)
+name: Linh Voice Bot (MythoMax)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -11,7 +11,7 @@ on:
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
 # nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-voice-bot
+  group: linh-mythomax-bot
   cancel-in-progress: false
 
 permissions:
@@ -27,44 +27,28 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # MỘT khóa OpenRouter dùng cho cả LLM (Mistral Nemo) lẫn giọng nói HeyGen (cần có credit vì Nemo là model trả phí)
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}           # Khóa từ aistudio.google.com để tạo ảnh (KHÔNG bắt buộc: thiếu thì bot chỉ gửi voice/chữ)
-      IMAGE_CHARACTER: ${{ secrets.IMAGE_CHARACTER }}         # (Tùy chọn) mô tả ngoại hình Linh bằng tiếng Anh để ảnh nhất quán; để trống = dùng mô tả mặc định
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # Một khóa OpenRouter dùng cho cả MythoMax (chat) lẫn HeyGen (giọng nói)
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-      # --- Cấu hình LLM (không nhạy cảm nên để thẳng ở đây) ---
-      # Dùng hoàn toàn Mistral Nemo. Đây là model TRẢ PHÍ (khoảng 0,02 USD/1 triệu token vào, 0,03 USD/1 triệu token ra)
-      # nên tài khoản OpenRouter cần có credit; đổi lại không bị hạn mức 50 lượt/ngày của model ":free".
-      LLM_MODEL: "mistralai/mistral-nemo"
-      # Model dự phòng (tùy chọn, ngăn cách bằng dấu phẩy). Để trống = chỉ dùng Mistral Nemo.
-      # Muốn thêm dự phòng cùng hãng Mistral: điền ID lấy ở https://openrouter.ai/mistralai
-      LLM_FALLBACK_MODELS: ""
-      LLM_REASONING: "0"          # Mistral Nemo không có reasoning -> để "0"
-      LLM_MAX_TOKENS: "800"       # Trần độ dài mỗi câu trả lời
-      LLM_TEMPERATURE: "0.8"      # Nemo dễ lặp/lạc khi nhiệt độ cao; hạ xuống 0.6-0.7 nếu thấy trả lời lộn xộn
-      LLM_ATTEMPTS: "2"           # Số lần thử khi câu trả lời bị loại (vô nghĩa/rỗng); lần sau tự hạ nhiệt độ
-      LLM_TIMEOUT: "60"           # Giây chờ tối đa cho mỗi model
-      LLM_TOTAL_BUDGET: "150"     # Tổng giây tối đa cho cả chuỗi model trước khi bỏ cuộc lượt này
-      # --- Cấu hình ảnh (Google AI Studio / Gemini). Hết lượt hoặc lỗi thì bot CHỈ gửi chữ ---
-      IMAGE_ENABLED: "1"          # "0" = tắt hẳn tính năng ảnh
-      # Model ảnh thử lần lượt. Nhiều tài khoản miễn phí không có lượt tạo ảnh (cần bật thanh toán) -> khi đó bot tự chỉ gửi chữ.
-      # Xem hạn mức thật ở https://aistudio.google.com/rate-limit và ID model ở ai.google.dev/gemini-api/docs/image-generation
-      IMAGE_MODELS: "gemini-3.1-flash-image,gemini-3.1-flash-lite-image,gemini-nano-banana-2.1"
-      IMAGE_ASPECT: "3:4"         # Tỉ lệ ảnh (3:4 = dọc như selfie); "-" = để model tự chọn
-      IMAGE_DAILY_LIMIT: "10"     # Tối đa ảnh mỗi ngày (giờ VN) để khỏi tốn tiền ngoài ý muốn; "0" = không giới hạn
-      IMAGE_TIMEOUT: "60"         # Giây chờ tối đa cho mỗi model ảnh
-      IMAGE_TOTAL_BUDGET: "100"   # Tổng giây tối đa cho việc tạo 1 ảnh
+      # --- Cấu hình chat (không nhạy cảm nên để thẳng ở đây) ---
+      # MythoMax 13B: trả phí theo token (rất rẻ), cần nạp credit OpenRouter. Muốn đổi model chỉ cần sửa dòng này
+      LLM_MODEL: "gryphe/mythomax-l2-13b"
+      LLM_MAX_TOKENS: "500"
+      LLM_TEMPERATURE: "0.85"
+      LLM_CONTEXT_CHARS: "6000"   # Ngữ cảnh model ngắn: tổng ký tự (persona + lịch sử) gửi đi. Persona dài thì tăng; lỗi 400 vượt ngữ cảnh thì giảm
+      LLM_STOP: "</s>|[INST]|\\nUser:|\\nAnh:"   # Cắt khi model tự viết tiếp lời của bạn; "-" = tắt, tối đa 4 mục
+      LLM_DATA_COLLECTION: "deny" # "deny" = chỉ dùng nhà cung cấp không lưu dữ liệu của bạn. Nếu log báo 404 về chính sách dữ liệu thì đổi thành "allow"
       # --- Cấu hình giọng nói ---
       # Bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo" (trả phí, cần nạp credit)
       TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
-      # Giọng có sẵn: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
-      TTS_VOICE: "sabrina"
+      # Giọng: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent
+      TTS_VOICE: "meredith"
       TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # STATE_FILE: "state_voice.json"   # Bỏ comment nếu muốn bản voice có bộ nhớ riêng, không dùng chung với bot cũ
+      # STATE_FILE: "state_mythomax.json"   # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung với bot cũ
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
