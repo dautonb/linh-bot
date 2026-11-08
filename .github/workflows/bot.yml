@@ -1,4 +1,4 @@
-name: Linh Voice Bot
+name: Linh Bot
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -11,7 +11,7 @@ on:
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
 # nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-voice-bot
+  group: linh-bot
   cancel-in-progress: false
 
 permissions:
@@ -27,42 +27,13 @@ jobs:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      # MỘT khóa OpenRouter dùng cho cả chat (Ling) lẫn giọng nói (HeyGen). KHÔNG còn cần DEEPSEEK_API_KEY.
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}   # Tùy chọn: để trống thì dùng inclusionai/ling-3.0-flash-vl
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
-
-      # --- Chat (không nhạy cảm nên để thẳng ở đây) ---
-      # Chỉ dùng Ling 3.0 Flash. Model chính là bản :free (miễn phí, nhưng chung hạn mức free của tài khoản:
-      # 20 yêu cầu/phút và 50 yêu cầu/ngày nếu chưa nạp đủ 10 credit).
-      LLM_MODEL: "inclusionai/ling-3.0-flash:free"
-      # Trang model không nói Ling 3.0 Flash có reasoning hay không. "1" = gửi reasoning enabled như mẫu OpenRouter, "0" = gửi tắt.
-      # Model từ chối tham số nào thì bot tự bỏ tham số đó và nhớ cho các lượt sau, nên đặt "1" hay "0" đều không gây lỗi.
-      LLM_REASONING: "1"
-      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (nếu model có trả về)
-      LLM_MAX_TOKENS: "4096"      # Nếu model có suy nghĩ thì token suy nghĩ tính chung vào mức này
-      # Model dự phòng, thử khi model chính lỗi hoặc bị 429: Ling 3.0 Flash bản TRẢ PHÍ (rất rẻ: ~$0,021 vào / $0,063 ra mỗi
-      # triệu token, có thể thay đổi; không dính hạn mức free và có 2 nhà cung cấp nên ổn định hơn).
-      # Bản này CẦN có credit trong tài khoản OpenRouter, chưa nạp thì sẽ báo lỗi 402 (hết credit).
-      # Muốn chỉ dùng miễn phí hoàn toàn: để trống ("") = không dự phòng.
-      LLM_FALLBACK_MODELS: "inclusionai/ling-3.0-flash"
-
-      # --- Giọng nói ---
-      # Theo ghi chú ở bản cũ, bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo"
-      # (trả phí, khoảng $4/triệu ký tự, cần nạp credit). Muốn dùng Fish Audio: "fish-audio/s2.1-pro-free:free" (kèm đổi TTS_VOICE).
-      TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
-      # Giọng HeyGen: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent.
-      # Giọng PHẢI khớp với model (Fish Audio dùng ID hex 32 ký tự, hoặc để trống = mặc định).
-      TTS_VOICE: "sabrina"
-      TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
-      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (chỉ Fish Audio hỗ trợ, HeyGen bỏ qua). Để trống = không gửi
-      SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
-      # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
-      # STATE_FILE: "state_ling.json"        # Bỏ comment nếu muốn bản này có bộ nhớ riêng, không dùng chung state.json của bot cũ
-
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
       TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
@@ -80,11 +51,6 @@ jobs:
 
       - name: Cài thư viện
         run: pip install -r requirements.txt
-
-      # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
-      # (thiếu ffmpeg thì bot gửi bản chữ). Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
-      - name: Cài ffmpeg
-        run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
       - name: Chạy bot
         id: bot
