@@ -41,10 +41,11 @@ jobs:
       # 20 yêu cầu/phút và 50 yêu cầu/ngày nếu chưa nạp đủ 10 credit). Đây là bản PREVIEW mới ra (10/11/2026) nên có thể
       # đông, đổi hoặc bị gỡ bất cứ lúc nào; trang OpenRouter cũng không nêu chính sách dữ liệu của model này.
       LLM_MODEL: "baidu/ernie-5.5-flash-preview:free"
-      # Trang model không nói ERNIE-5.5-Flash-Preview có reasoning hay không. "1" = gửi reasoning enabled như mẫu OpenRouter, "0" = gửi tắt.
-      # Model từ chối tham số nào thì bot tự bỏ tham số đó và nhớ cho các lượt sau, nên đặt "1" hay "0" đều không gây lỗi.
-      LLM_REASONING: "1"
-      KEEP_REASONING: "1"         # "1" = lưu và gửi lại reasoning_details của 2 câu trả lời gần nhất (nếu model có trả về)
+      # ĐANG TẮT SUY NGHĨ: bot gửi reasoning {"effort": "none"}. Trang model không nói ERNIE-5.5-Flash-Preview có tắt được hay không;
+      # nếu model từ chối (lỗi 400) thì bot tự gọi lại không có tham số reasoning (tốn thêm 1 yêu cầu ở tin đầu tiên) và nhớ cho
+      # các lượt sau, khi đó model chạy theo mặc định của nó. Muốn bật lại suy nghĩ (như mẫu OpenRouter): đổi thành "1".
+      LLM_REASONING: "0"
+      KEEP_REASONING: "0"         # "0" = không lưu/gửi lại reasoning_details (tắt suy nghĩ nên không có gì để giữ). "1" = giữ 2 câu gần nhất
       LLM_MAX_TOKENS: "4096"      # Nếu model có suy nghĩ thì token suy nghĩ tính chung vào mức này
       # Model dự phòng, cách nhau bằng dấu phẩy, thử khi ERNIE lỗi hoặc bị 429. Để trống = KHÔNG dự phòng (mặc định, vì
       # ERNIE preview không có bản trả phí cùng tên). Muốn dự phòng miễn phí: "inclusionai/ling-3.0-flash:free".
