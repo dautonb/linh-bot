@@ -134,7 +134,7 @@ STATE_FILE = env("STATE_FILE", "state_ernie.json")
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 15           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
+MEMORY_WINDOW = 60           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
 MAX_STORED_MESSAGES = 600000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
