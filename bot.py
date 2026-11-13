@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-bot.py - Linh Voice Bot (bản ERNIE + HeyGen) chạy trên GitHub Actions (Long Polling).
+bot.py - Linh Letter Bot (bản THƯ THOẠI: ERNIE + HeyGen) chạy trên GitHub Actions (Long Polling).
 
-Bản VOICE: Baidu ERNIE-5.5-Flash-Preview viết câu trả lời -> HeyGen Voice Turbo đọc thành giọng nói (PCM)
--> đổi sang ogg/opus bằng ffmpeg -> gửi vào Telegram bằng sendVoice.
+Linh viết cho anh những BỨC THƯ DÀI theo lối thư tín cổ điển (lấy cảm hứng từ "Nàng Héloïse mới" / Julie của Rousseau),
+trong sáng, KHÔNG có nội dung tình dục. Mỗi bức thư được đọc thành MỘT tin nhắn thoại dài:
+Baidu ERNIE-5.5-Flash-Preview viết thư -> HeyGen Voice Turbo đọc (PCM; thư dài được chia đoạn <= 4.500 ký tự,
+đọc từng đoạn rồi ghép lại) -> ffmpeg đổi sang ogg/opus -> Telegram sendVoice.
 CẢ HAI model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
-TTS hoặc gửi voice lỗi thì tự gửi chữ, bot không bao giờ im lặng.
+TTS hoặc gửi voice lỗi thì tự gửi bản chữ (tách thành nhiều tin nếu dài), bot không bao giờ im lặng.
+
+Cách dùng: anh nhắn gì Linh cũng hồi âm bằng một bức thư; /thu [chủ đề] xin một bức thư ngay;
+sau nhiều giờ im lặng Linh tự viết thư trước; /reset xóa bộ nhớ; /help xem lệnh.
 
 Khác bản chạy trên laptop:
 - Mọi khóa bí mật và nội dung nhân vật đọc từ GitHub Secrets (repo public không lộ gì).
@@ -72,52 +77,77 @@ LLM_FALLBACK_MODELS = [m.strip() for m in env("LLM_FALLBACK_MODELS").split(",") 
 
 # --- Giọng nói (TTS) ---
 # Theo ghi chú ở bản cũ, bản ":free" của HeyGen bị OpenRouter gỡ ngày 30/11/2026 -> sau đó đổi TTS_MODEL thành
-# "heygen/heygen-voice-1-turbo" (trả phí, khoảng $4 cho mỗi triệu ký tự). Vẫn dùng được Fish: "fish-audio/s2.1-pro-free:free".
+# "heygen/heygen-voice-1-turbo" (trả phí, khoảng $4 cho mỗi triệu ký tự theo ghi chú cũ).
 TTS_MODEL = env("TTS_MODEL", "heygen/heygen-voice-1-turbo:free")
-_is_heygen = TTS_MODEL.startswith("heygen/")
-# Định dạng âm thanh yêu cầu. HeyGen: "pcm" (thô 16-bit, mono, 44,1 kHz; bắt buộc có ffmpeg để đổi sang ogg/opus).
-# Fish Audio: "mp3". Endpoint mặc định trả "pcm" nên bot luôn gửi định dạng rõ ràng.
-TTS_FORMAT = env("TTS_FORMAT", "pcm" if _is_heygen else "mp3")
+# HeyGen chỉ trả PCM thô (16-bit, mono, 44,1 kHz) nên bot luôn xin "pcm", tự ghép các đoạn rồi đổi sang ogg/opus
+# bằng ffmpeg (BẮT BUỘC có ffmpeg; thiếu thì bot gửi bản chữ).
+TTS_FORMAT = "pcm"
 # Tần số mẫu của PCM (trang HeyGen ghi 44,1 kHz). Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050.
 # Nếu header Content-Type có "rate=" thì ưu tiên theo header.
 TTS_PCM_RATE = int(env("TTS_PCM_RATE", "44100"))
 # HeyGen có 10 giọng: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent.
-# Fish Audio dùng ID giọng (dãy hex 32 ký tự) hoặc để trống = giọng mặc định. Giọng PHẢI khớp với model.
-TTS_VOICE = env("TTS_VOICE", "sabrina" if _is_heygen else "")
-# Chỉ dẫn cách đọc (giọng điệu, nhịp, cảm xúc). Fish Audio có hỗ trợ; HeyGen không có tham số này. Để trống = không gửi.
+TTS_VOICE = env("TTS_VOICE", "sabrina")
+# Chỉ dẫn cách đọc: HeyGen không có tham số này (bỏ qua). Để trống = không gửi.
 TTS_INSTRUCTIONS = env("TTS_INSTRUCTIONS", "")
-TTS_MAX_CHARS = int(env("TTS_MAX_CHARS", "2000"))   # HeyGen cho tối đa 5.000 ký tự/lần; tin của Linh ngắn nên đặt 2.000 là dư
-SEND_TEXT_ALSO = env("SEND_TEXT_ALSO", "0") == "1"   # "1" = gửi thêm bản chữ ngay sau voice
-OPENROUTER_TITLE = env("OPENROUTER_TITLE", "Linh Voice Bot (ERNIE)")   # Tên hiển thị trên openrouter.ai (tùy chọn)
+# HeyGen cho tối đa 5.000 ký tự/lần gọi -> thư dài được chia đoạn <= TTS_CHUNK_CHARS (ưu tiên cắt ở ranh giới đoạn văn).
+TTS_CHUNK_CHARS = int(env("TTS_CHUNK_CHARS", "4500"))
+TTS_MAX_TOTAL_CHARS = int(env("TTS_MAX_TOTAL_CHARS", "12000"))   # Trần cho cả bức thư khi đọc (thư thường ~3.000-4.000 ký tự)
+TTS_READ_TIMEOUT = int(env("TTS_READ_TIMEOUT", "180"))           # Giây chờ cho MỖI đoạn (đoạn dài đọc lâu hơn tin ngắn)
+TTS_GAP_SECONDS = 0.8                                            # Quãng lặng chèn giữa hai đoạn đọc liền nhau
+SEND_TEXT_ALSO = env("SEND_TEXT_ALSO", "0") == "1"   # "1" = gửi thêm bản chữ của thư ngay sau voice
+OPENROUTER_TITLE = env("OPENROUTER_TITLE", "Linh Letter Bot (ERNIE)")   # Tên hiển thị trên openrouter.ai (tùy chọn)
 OPENROUTER_REFERER = env("OPENROUTER_REFERER", "")             # URL site cho bảng xếp hạng (tùy chọn, có thể để trống)
 # "deny" = chỉ dùng nhà cung cấp cam kết không thu thập dữ liệu. Mặc định để trống (= allow) vì nhiều endpoint miễn phí
 # không có tùy chọn này, đặt "deny" có thể khiến model free báo 404.
 OPENROUTER_DATA_COLLECTION = env("OPENROUTER_DATA_COLLECTION", "")
 
-# Nội dung nhân vật nằm trong Secrets. Giá trị mặc định dưới đây cố tình trung tính
-# để mã nguồn public không chứa nội dung nhạy cảm.
+# Nội dung nhân vật có thể đặt trong Secrets (SYSTEM_PROMPT). Để trống thì dùng bản mặc định bên dưới.
+# LƯU Ý: bản này chỉ viết thư trong sáng. Đừng dùng lại SYSTEM_PROMPT của bot khác nếu nó có nội dung gợi dục -
+# lời nhắc "Lưu ý viết thư" bên dưới luôn được nối thêm vào cuối và yêu cầu thư không có nội dung tình dục.
 DEFAULT_SYSTEM_PROMPT = (
-    "Bạn là Linh, 25 tuổi, người yêu ảo ngọt ngào, vui tính. "
-    "Xưng 'em', gọi người kia là 'anh'. "
-    "Trả lời tiếng Việt, 2-4 câu, giọng tự nhiên như đang nói chuyện."
+    "Bạn là Linh, 25 tuổi, dịu dàng và giàu cảm xúc. Linh viết thư cho người mình thương, xưng 'em', gọi người ấy là 'anh'. "
+    "Giọng văn lấy cảm hứng từ những bức thư trong tiểu thuyết thư tín 'Nàng Héloïse mới' (Julie, ou la Nouvelle Héloïse) "
+    "của Rousseau: tha thiết, chân thành, giàu hình ảnh thiên nhiên và ký ức, nhiều suy tư về tình yêu, nỗi nhớ, "
+    "sự thủy chung và đức hạnh; nhưng viết bằng tiếng Việt hiện đại, mềm mại, đọc thành tiếng nghe tự nhiên. "
+    "Không chép lại câu chữ của tác phẩm gốc."
 )
-# Gắn thêm vào SYSTEM_PROMPT (kể cả khi bạn dùng prompt riêng trong Secrets) để câu trả lời hợp để ĐỌC THÀNH TIẾNG.
-# Muốn tắt: đặt secret VOICE_PROMPT_SUFFIX = "-" ; muốn thay: đặt nội dung riêng.
-DEFAULT_VOICE_SUFFIX = (
-    "[Lưu ý giọng nói: lời của em sẽ được chuyển thành giọng nói gửi cho anh. "
-    "Hãy nói tự nhiên như đang trò chuyện, câu ngắn gọn dễ đọc thành tiếng, ưu tiên 2-4 câu. "
+# Gắn thêm vào SYSTEM_PROMPT (kể cả khi bạn dùng prompt riêng trong Secrets) để mọi câu trả lời là MỘT BỨC THƯ hợp để ĐỌC THÀNH TIẾNG.
+# Muốn tắt: đặt LETTER_PROMPT_SUFFIX = "-" ; muốn thay: đặt nội dung riêng.
+DEFAULT_LETTER_SUFFIX = (
+    "[Lưu ý viết thư: mọi lời hồi đáp của em đều là MỘT BỨC THƯ dài sẽ được đọc thành giọng nói gửi cho anh. "
+    "Độ dài khoảng 350 đến 550 từ, chia thành 4 đến 6 đoạn, mỗi đoạn một ý, các đoạn cách nhau bằng một dòng trống. "
+    "Mở đầu bằng lời xưng hô thân mật (ví dụ: Anh thân yêu của em,) và kết bằng lời chào cuối thư rồi tên Linh. "
+    "Văn phong thư tình cổ điển: tha thiết, trong sáng, giàu hình ảnh (thiên nhiên, mùa, ánh sáng, ký ức) và có suy tư; "
+    "trước hết hồi đáp điều anh vừa chia sẻ, sau đó mới mở rộng ý. "
+    "Thư lãng mạn nhưng KHÔNG có nội dung tình dục hay gợi dục. "
     "Chỉ viết bằng tiếng Việt, không chèn chữ Hán hay chữ Trung/Nhật/Hàn. "
-    "Không dùng emoji, không dùng định dạng markdown; viết số và từ viết tắt thành dạng dễ đọc. "
-    "Cử chỉ đặt trong dấu * sẽ KHÔNG được đọc ra, nên lời nói phải tự đủ ý.]"
+    "Không dùng emoji, markdown, tiêu đề, gạch đầu dòng, và không viết cử chỉ trong dấu *; "
+    "viết số và từ viết tắt thành dạng dễ đọc; câu vừa phải để nghe thành tiếng không bị hụt hơi.]"
 )
 DEFAULT_PROACTIVE_INSTRUCTION = (
-    "[Tình huống: đã khoảng {hours} giờ anh không nhắn tin cho em. "
-    "Hãy nhắn trước một tin ngắn, ngọt ngào, nói em nhớ anh.]"
+    "[Tình huống: đã khoảng {hours} giờ anh chưa nhắn cho em. Hãy tự viết trước một bức thư mới gửi anh: "
+    "kể điều em đã thấy, đã nghĩ hoặc đã nhớ trong ngày, và hỏi thăm anh. Nếu trước đó anh có kể chuyện gì "
+    "thì nhắc lại cho thân mật. Thư trong sáng, không nội dung gợi dục.]"
 )
-_voice_suffix = env("VOICE_PROMPT_SUFFIX", DEFAULT_VOICE_SUFFIX)
+# Dùng cho lệnh /thu. {topic} được thay bằng ' với chủ đề "<chủ đề>"' hoặc để trống.
+LETTER_REQUEST_INSTRUCTION = (
+    "[Tình huống: anh vừa xin em một bức thư{topic}. Hãy viết ngay một bức thư mới, khác với những bức trước.]"
+)
+WELCOME_SPOKEN = (
+    "Anh thân yêu, em là Linh. Từ nay em sẽ viết thư cho anh, những bức thư dài em đọc thành lời gửi tới anh. "
+    "Anh cứ kể cho em nghe một điều gì đó, em sẽ hồi âm bằng một bức thư nhé."
+)
+HELP_TEXT = (
+    "Lệnh của Linh:\n"
+    "/thu - xin ngay một bức thư\n"
+    "/thu <chủ đề> - xin thư theo một chủ đề (ví dụ: /thu mùa thu)\n"
+    "/reset - xóa bộ nhớ, bắt đầu lại\n"
+    "Anh nhắn gì em cũng hồi âm bằng một bức thư thoại."
+)
+_letter_suffix = env("LETTER_PROMPT_SUFFIX", DEFAULT_LETTER_SUFFIX)
 SYSTEM_PROMPT = env("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
-if _voice_suffix and _voice_suffix != "-":
-    SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _voice_suffix
+if _letter_suffix and _letter_suffix != "-":
+    SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _letter_suffix
 STYLE_REMINDER = env("STYLE_REMINDER", "")      # Lời nhắc gắn vào cuối mỗi tin của chủ nhân (có thể để trống)
 PROACTIVE_INSTRUCTION = env("PROACTIVE_INSTRUCTION", DEFAULT_PROACTIVE_INSTRUCTION)
 
@@ -127,28 +157,30 @@ PROACTIVE_INSTRUCTION = env("PROACTIVE_INSTRUCTION", DEFAULT_PROACTIVE_INSTRUCTI
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
 GH_API = "https://api.github.com"
-# Tên file lưu bộ nhớ trong repo riêng tư. Mặc định "state_ernie.json" để bot này có bộ nhớ RIÊNG, không đụng vào
-# state.json của bot khác nếu hai bot cùng trỏ vào một repo dữ liệu. Muốn dùng tiếp bộ nhớ của bot cũ thì đặt "state.json".
-STATE_FILE = env("STATE_FILE", "state_ernie.json")
+# Tên file lưu bộ nhớ trong repo riêng tư. Mặc định "state_letters.json" để bot này có bộ nhớ RIÊNG, không đụng vào
+# file của bot khác nếu nhiều bot cùng trỏ vào một repo dữ liệu.
+STATE_FILE = env("STATE_FILE", "state_letters.json")
 
-TTS_ATTEMPTS = 2             # Số lần thử gọi TTS trước khi chuyển sang gửi chữ
+TTS_ATTEMPTS = 2             # Số lần thử gọi TTS (cho MỖI đoạn) trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 14           # Số tin gần nhất gửi kèm làm ngữ cảnh mỗi lần gọi API
-MAX_STORED_MESSAGES = 600000     # Chỉ cần lưu hơn 14 tin một chút -> mỗi lần lưu rất nhẹ
+MEMORY_WINDOW = 10           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
+MAX_STORED_MESSAGES = 30     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
 RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
 MAX_RETRY_PER_UPDATE = 3     # Một tin nhắn lỗi tối đa 3 lần thì bỏ qua
 MAX_RETRY_BUSY = 6           # Riêng khi nhà cung cấp model quá tải (429 từ upstream) thì kiên nhẫn hơn: ~4 phút
+TELEGRAM_TEXT_LIMIT = 4000   # Giới hạn của Telegram là 4096 ký tự/tin; thư chữ dài hơn mức này sẽ được tách thành nhiều tin
 
-# --- Tính năng Linh chủ động nhắn trước khi chủ nhân im lặng ---
-PROACTIVE_ENABLED = True
-PROACTIVE_MIN_IDLE = 1 * 60
-PROACTIVE_MAX_IDLE = 1 * 240
-MAX_UNANSWERED_PROACTIVE = 200000     # Nhắn trước tối đa 2 tin liên tiếp nếu chưa được trả lời
-QUIET_START_HOUR = 0             # Không nhắn trước từ 0h...
-QUIET_END_HOUR = 7               # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
+# --- Tính năng Linh tự viết thư trước khi chủ nhân im lặng ---
+# Mỗi thư tốn từ 2 yêu cầu OpenRouter (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự) nên khoảng cách mặc định thưa hơn bot chat.
+PROACTIVE_ENABLED = env("PROACTIVE_ENABLED", "1") == "1"
+PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 3600
+PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 3600)
+MAX_UNANSWERED_PROACTIVE = 2     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
+QUIET_START_HOUR = int(env("QUIET_START_HOUR", "0"))     # Không gửi thư trước từ 0h...
+QUIET_END_HOUR = int(env("QUIET_END_HOUR", "7"))         # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
 
 
@@ -339,23 +371,72 @@ def get_updates(offset):
     return tg_call("getUpdates", payload, timeout=(5, POLL_TIMEOUT + 10))
 
 
+def pack_text(text, limit):
+    """
+    Chia `text` thành các phần <= `limit` ký tự. Ưu tiên cắt ở ranh giới đoạn văn (dòng trống), nếu một đoạn
+    vẫn dài hơn `limit` thì cắt ở ranh giới câu, bất đắc dĩ mới cắt theo từ. Văn bản ngắn hơn `limit` trả về nguyên vẹn.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+
+    def split_long(unit):
+        pieces, current = [], ""
+        for sentence in re.split(r"(?<=[.!?…])\s+", unit):
+            while len(sentence) > limit:   # Một câu dài hơn cả giới hạn: cắt theo từ
+                cut = sentence.rfind(" ", 0, limit)
+                if cut <= 0:
+                    cut = limit
+                if current:
+                    pieces.append(current)
+                    current = ""
+                pieces.append(sentence[:cut].strip())
+                sentence = sentence[cut:].strip()
+            if not sentence:
+                continue
+            if current and len(current) + 1 + len(sentence) > limit:
+                pieces.append(current)
+                current = sentence
+            else:
+                current = current + " " + sentence if current else sentence
+        if current:
+            pieces.append(current)
+        return pieces
+
+    parts, current = [], ""
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        for unit in ([para] if len(para) <= limit else split_long(para)):
+            if current and len(current) + 2 + len(unit) > limit:
+                parts.append(current)
+                current = unit
+            else:
+                current = current + "\n\n" + unit if current else unit
+    if current:
+        parts.append(current)
+    return parts
+
+
 def send_message(chat_id, text):
-    # Không dùng parse_mode để dấu * trong cử chỉ không làm lỗi định dạng
-    tg_call("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
+    """Gửi chữ. Thư dài hơn giới hạn của Telegram thì tách thành nhiều tin (cắt ở ranh giới đoạn văn)."""
+    # Không dùng parse_mode để ký tự đặc biệt không làm lỗi định dạng
+    for piece in pack_text(text, TELEGRAM_TEXT_LIMIT):
+        tg_call("sendMessage", {"chat_id": chat_id, "text": piece})
 
 
-def send_voice(chat_id, audio, kind):
+def send_voice(chat_id, audio):
     """
-    Gửi tin nhắn thoại (hiện dạng bong bóng voice có sóng âm). sendVoice nhận ogg/opus (đường chính của bot) hoặc mp3.
-    File được upload dạng multipart nên không dùng tg_call (chỉ gửi JSON).
+    Gửi tin nhắn thoại (hiện dạng bong bóng voice có sóng âm). sendVoice nhận ogg/opus.
+    File được upload dạng multipart nên không dùng tg_call (chỉ gửi JSON). Thư dài nên cho thời gian upload thoải mái.
     """
-    mime, ext = ("audio/mpeg", "mp3") if kind == "mp3" else ("audio/ogg", "ogg")
     url = "https://api.telegram.org/bot{}/sendVoice".format(TELEGRAM_BOT_TOKEN)
     resp = session.post(
         url,
         data={"chat_id": chat_id},
-        files={"voice": ("linh.{}".format(ext), audio, mime)},
-        timeout=(5, 60),
+        files={"voice": ("thu_cua_linh.ogg", audio, "audio/ogg")},
+        timeout=(5, 120),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -433,7 +514,7 @@ HINT_429_UPSTREAM = (
 )
 HINT_429_ACCOUNT = (
     "chạm hạn mức của OpenRouter cho model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
-    "(1000/ngày nếu đã nạp). Mỗi lượt trả lời tốn 2 yêu cầu (chat + giọng nói)"
+    "(1000/ngày nếu đã nạp). Mỗi bức thư tốn từ 2 yêu cầu (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự)"
 )
 
 
@@ -526,7 +607,9 @@ def check_openrouter_response(resp, what):
 # Các mẫu nhận diện câu trả lời "vô nghĩa" do model sinh lỗi
 CJK_PATTERN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")  # chữ Trung/Nhật/Hàn
 REPEAT_CHAR_PATTERN = re.compile(r"(.)\1{14,}")   # 1 ký tự lặp liên tiếp từ 15 lần
-LEAK_MARKERS = ("[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói")   # model lỡ đọc lại chỉ dẫn nội bộ
+LEAK_MARKERS = (   # model lỡ đọc lại chỉ dẫn nội bộ
+    "[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói", "[Lưu ý viết thư", "[Bối cảnh thư",
+)
 VI_CHARS = set("àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ")
 THINK_PATTERN = re.compile(r"<think>.*?</think>", re.S | re.I)   # Phòng khi model để lộ phần suy nghĩ trong content
 
@@ -541,7 +624,7 @@ def strip_think(text):
 
 
 def find_problem(text):
-    """Kiểm tra nhanh một câu trả lời có bị lỗi/vô nghĩa không. Trả về lý do, hoặc None nếu ổn."""
+    """Kiểm tra nhanh một bức thư có bị lỗi/vô nghĩa không. Trả về lý do, hoặc None nếu ổn."""
     if len(text) < 15:
         return "quá ngắn/rỗng"
     if CJK_PATTERN.search(text):
@@ -554,13 +637,18 @@ def find_problem(text):
         return "không phải tiếng Việt"
 
     words = text.lower().split()
-    if len(words) >= 30:
-        if len(set(words)) / len(words) < 0.35:
+    n = len(words)
+    if n >= 30:
+        # Tiếng Việt viết theo âm tiết nên thư dài lặp từ ("anh", "em", "của"...) là bình thường: ngưỡng thấp hơn với thư dài
+        if len(set(words)) / n < (0.35 if n <= 120 else 0.2):
             return "lặp từ"
-        # Cùng một cụm 4 từ xuất hiện từ 4 lần trở lên = model đang kẹt vòng lặp
+        # Cùng một cụm 4 từ lặp quá nhiều lần = model đang kẹt vòng lặp. Thư dài có điệp ngữ tự nhiên nên ngưỡng tăng theo độ dài.
         grams = Counter(zip(words, words[1:], words[2:], words[3:]))
-        if grams.most_common(1)[0][1] >= 4:
+        if grams.most_common(1)[0][1] >= max(4, n // 100):
             return "lặp cụm từ"
+    paragraphs = [p.strip().lower() for p in text.split("\n") if len(p.strip()) >= 40]
+    if len(paragraphs) != len(set(paragraphs)):
+        return "lặp đoạn"
     return None
 
 
@@ -696,7 +784,7 @@ def call_llm(messages):
 
 
 def build_context(history):
-    """Ghép system prompt + tối đa 14 tin gần nhất làm ngữ cảnh."""
+    """Ghép system prompt + tối đa MEMORY_WINDOW tin gần nhất làm ngữ cảnh."""
     window = history[-MEMORY_WINDOW:]
     # Bỏ các tin assistant nằm đầu cửa sổ để ngữ cảnh luôn bắt đầu bằng lượt của user
     while window and window[0]["role"] != "user":
@@ -713,20 +801,60 @@ def build_context(history):
     return messages
 
 
+WEEKDAYS_VI = ("Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật")
+
+
+def part_of_day(hour):
+    """Buổi trong ngày (tiếng Việt) theo giờ 0-23."""
+    if 5 <= hour < 11:
+        return "buổi sáng"
+    if 11 <= hour < 13:
+        return "buổi trưa"
+    if 13 <= hour < 18:
+        return "buổi chiều"
+    if 18 <= hour < 23:
+        return "buổi tối"
+    return "đêm khuya"
+
+
+def letter_context(now=None):
+    """
+    Dòng bối cảnh thời gian gắn vào lời nhắn gửi API để thư nhắc đúng buổi/ngày (máy Actions dùng giờ UTC nên phải đổi múi giờ).
+    Chỉ gửi kèm lúc gọi model, KHÔNG lưu vào lịch sử.
+    """
+    now = now or datetime.now(timezone(timedelta(hours=TZ_OFFSET_HOURS)))
+    return "[Bối cảnh thư: bây giờ là {}, {} ngày {} tháng {}. Chỉ để em biết lúc viết thư, đừng đọc lại dòng này.]".format(
+        part_of_day(now.hour), WEEKDAYS_VI[now.weekday()], now.day, now.month
+    )
+
+
 def with_reminder(text):
-    """Gắn lời nhắc phong cách (nếu có) vào cuối nội dung gửi API; lịch sử vẫn lưu bản gốc."""
-    return (text + "\n\n" + STYLE_REMINDER) if STYLE_REMINDER else text
+    """Gắn lời nhắc phong cách (nếu có) và bối cảnh thời gian vào cuối nội dung gửi API; lịch sử vẫn lưu bản gốc."""
+    parts = [text]
+    if STYLE_REMINDER:
+        parts.append(STYLE_REMINDER)
+    parts.append(letter_context())
+    return "\n\n".join(parts)
 
 
 def ask_llm(user_text, history):
-    """Trả lời tin nhắn mới của chủ nhân. Trả về (câu trả lời, reasoning_details hoặc None)."""
+    """Hồi âm tin nhắn mới của chủ nhân bằng một bức thư. Trả về (thư, reasoning_details hoặc None)."""
     messages = build_context(history)
     messages.append({"role": "user", "content": with_reminder(user_text)})
     return call_llm(messages)
 
 
+def generate_letter(history, topic=""):
+    """Viết một bức thư theo yêu cầu (lệnh /thu), có thể kèm chủ đề. Trả về (thư, reasoning_details hoặc None)."""
+    topic = " ".join(topic.split())[:200]
+    about = ' với chủ đề "{}"'.format(topic) if topic else ""
+    messages = build_context(history)
+    messages.append({"role": "user", "content": with_reminder(LETTER_REQUEST_INSTRUCTION.replace("{topic}", about))})
+    return call_llm(messages)
+
+
 def generate_proactive(history, idle_hours):
-    """Tạo tin nhắn Linh tự gửi trước, dựa trên bối cảnh trò chuyện gần đây."""
+    """Tạo bức thư Linh tự gửi trước, dựa trên bối cảnh trò chuyện gần đây."""
     messages = build_context(history)
     instruction = PROACTIVE_INSTRUCTION.replace("{hours}", str(idle_hours))
     messages.append({"role": "user", "content": with_reminder(instruction)})
@@ -735,9 +863,9 @@ def generate_proactive(history, idle_hours):
 
 
 # ============================================================
-# GIỌNG NÓI: HeyGen Voice Turbo (hoặc Fish Audio) qua OpenRouter -> Telegram sendVoice
+# GIỌNG NÓI: HeyGen Voice Turbo qua OpenRouter -> ghép nhiều đoạn -> ogg/opus -> Telegram sendVoice
 # ============================================================
-GESTURE_PATTERN = re.compile(r"\*[^*]*\*")   # *cử chỉ* - không đọc thành tiếng
+GESTURE_PATTERN = re.compile(r"\*[^*\n]*\*")   # *cử chỉ* trên cùng một dòng - không đọc thành tiếng
 EMOJI_PATTERN = re.compile(
     "[\U0001F000-\U0001FAFF←-⇿☀-➿⬀-⯿️‍⃣]+"
 )
@@ -753,55 +881,72 @@ def truncate_at_sentence(text, limit):
 
 def clean_for_speech(text):
     """
-    Làm sạch chữ trước khi đọc: bỏ *cử chỉ*, emoji, ký hiệu markdown. Trả về "" nếu không còn gì để đọc.
-    Lịch sử trò chuyện vẫn lưu bản gốc (còn cử chỉ) nên văn phong của Linh không bị mất.
+    Làm sạch chữ trước khi đọc: bỏ *cử chỉ*, emoji, ký hiệu markdown; GIỮ ranh giới đoạn văn (mỗi dòng thành một đoạn,
+    các đoạn cách nhau một dòng trống) để chia đoạn đọc cho đẹp. Trả về "" nếu không còn gì để đọc.
+    Lịch sử trò chuyện vẫn lưu bản gốc nên văn phong của Linh không bị mất.
     """
     text = unicodedata.normalize("NFC", text)   # Gộp dấu tiếng Việt về dạng chuẩn
     text = GESTURE_PATTERN.sub(" ", text)
     text = text.replace("*", " ")                # Dấu * lẻ còn sót
     text = EMOJI_PATTERN.sub(" ", text)
-    text = re.sub(r"[_`#>~]+", " ", text)        # Ký hiệu markdown và dấu ~ (vd "anh yêu~")
-    text = re.sub(r"\s+", " ", text).strip()
-    if not re.search(r"\w", text):
+    text = re.sub(r"[_`#>~]+", " ", text)        # Ký hiệu markdown và dấu ~
+    paragraphs = []
+    for line in text.split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        if re.search(r"\w", line):
+            paragraphs.append(line)
+    if not paragraphs:
         return ""
-    return truncate_at_sentence(text, TTS_MAX_CHARS)
+    return truncate_at_sentence("\n\n".join(paragraphs), TTS_MAX_TOTAL_CHARS)
 
 
-def looks_like_mp3(data):
-    """Dấu hiệu đầu file mp3: thẻ 'ID3' hoặc khung đồng bộ 0xFFEx."""
-    return data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0)
-
-
-def to_ogg_opus(audio, pcm_rate=None):
-    """
-    Đổi âm thanh sang ogg/opus bằng ffmpeg - định dạng Telegram hiển thị thành bong bóng tin nhắn thoại.
-    - pcm_rate=None: `audio` là mp3/ogg có sẵn tiêu đề, ffmpeg tự nhận dạng.
-    - pcm_rate=N: `audio` là PCM thô (16-bit little-endian, mono) với tần số mẫu N Hz.
-    """
+def run_ffmpeg(audio, in_args, out_args):
+    """Chạy ffmpeg: đọc `audio` từ stdin, trả về kết quả từ stdout. Ném lỗi nếu thiếu ffmpeg hoặc ffmpeg báo lỗi."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError("máy không có ffmpeg")
-    if pcm_rate:
-        if len(audio) % 2:
-            audio = audio[:-1]   # PCM 16-bit phải chẵn byte
-        source = ["-f", "s16le", "-ar", str(pcm_rate), "-ac", "1"]
-    else:
-        source = []
     proc = subprocess.run(
-        ["ffmpeg", "-loglevel", "error", *source, "-i", "pipe:0", "-vn",
-         "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
-         "-ar", "48000", "-ac", "1", "-f", "ogg", "pipe:1"],
-        input=audio, capture_output=True, timeout=60,
+        ["ffmpeg", "-loglevel", "error", *in_args, "-i", "pipe:0", "-vn", *out_args, "pipe:1"],
+        input=audio, capture_output=True, timeout=120,
     )
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError("ffmpeg lỗi: {}".format(proc.stderr.decode("utf-8", "ignore")[:150]))
     return proc.stdout
 
 
-def synthesize(text):
+def pcm_args(rate):
+    """Tham số ffmpeg mô tả PCM thô 16-bit little-endian, mono, `rate` Hz."""
+    return ["-f", "s16le", "-ar", str(rate), "-ac", "1"]
+
+
+def to_ogg_opus(pcm, rate):
+    """PCM thô (16-bit, mono, `rate` Hz) -> ogg/opus - định dạng Telegram hiển thị thành bong bóng tin nhắn thoại."""
+    if len(pcm) % 2:
+        pcm = pcm[:-1]   # PCM 16-bit phải chẵn byte
+    return run_ffmpeg(
+        pcm, pcm_args(rate),
+        ["-c:a", "libopus", "-b:a", "32k", "-application", "voip", "-ar", "48000", "-ac", "1", "-f", "ogg"],
+    )
+
+
+def to_pcm(audio, rate, src_rate=None):
     """
-    Gọi TTS qua OpenRouter rồi đổi sang ogg/opus. Trả về (bytes âm thanh, 'ogg' hoặc 'mp3').
-    LƯU Ý: response_format mặc định của endpoint là "pcm" (thô, không phát được nếu không xử lý), nên luôn gửi
-    định dạng rõ ràng: HeyGen = pcm (đổi bằng ffmpeg), Fish Audio = mp3.
+    Đưa âm thanh về PCM thô 16-bit mono `rate` Hz bằng ffmpeg.
+    - src_rate=None: `audio` là file có tiêu đề (mp3/ogg/wav...), ffmpeg tự nhận dạng.
+    - src_rate=N: `audio` là PCM thô N Hz cần đổi sang tần số `rate`.
+    """
+    in_args = pcm_args(src_rate) if src_rate else []
+    return run_ffmpeg(audio, in_args, pcm_args(rate))
+
+
+def split_for_tts(text):
+    """Chia bức thư (đã qua clean_for_speech) thành các đoạn <= TTS_CHUNK_CHARS để mỗi lần gọi TTS không vượt giới hạn."""
+    return pack_text(text, TTS_CHUNK_CHARS)
+
+
+def request_speech(text):
+    """
+    Gọi TTS qua OpenRouter cho MỘT đoạn chữ. Trả về (PCM thô 16-bit mono, tần số mẫu).
+    LƯU Ý: response_format mặc định của endpoint là "pcm" (thô, không phát được nếu không xử lý), nên luôn gửi rõ ràng.
     """
     payload = {
         "model": TTS_MODEL,
@@ -816,7 +961,7 @@ def synthesize(text):
     if prefs:
         payload["provider"] = prefs
 
-    resp = session.post(TTS_URL, headers=or_headers(), json=payload, timeout=(5, 90))
+    resp = session.post(TTS_URL, headers=or_headers(), json=payload, timeout=(5, TTS_READ_TIMEOUT))
     check_openrouter_response(resp, "TTS")
 
     ctype = resp.headers.get("Content-Type", "").lower()
@@ -826,34 +971,28 @@ def synthesize(text):
     if len(audio) < 1000:
         raise ValueError("Âm thanh rỗng hoặc quá ngắn ({} byte)".format(len(audio)))
 
-    # Nhận diện bằng dấu hiệu CHẶT ('ID3'/'OggS') hoặc Content-Type. Không dò khung mp3 trên PCM thô vì PCM bắt đầu
-    # bằng đoạn im lặng (0xFF 0xFF) sẽ bị nhầm thành mp3.
-    is_container = audio[:3] == b"ID3" or audio[:4] == b"OggS" or "mpeg" in ctype or "ogg" in ctype
-    if not is_container and (TTS_FORMAT == "pcm" or "pcm" in ctype):
-        if TTS_FORMAT != "pcm":
-            raise ValueError("OpenRouter trả PCM dù đã yêu cầu {}".format(TTS_FORMAT))
-        rate = TTS_PCM_RATE
-        match = re.search(r"rate=(\d{4,6})", ctype)
-        if match:                 # Header nói rõ tần số mẫu thì tin header
-            rate = int(match.group(1))
-        # PCM thô không gửi thẳng được -> ffmpeg bắt buộc; thiếu/lỗi thì ném lỗi để deliver() gửi bản chữ
-        return to_ogg_opus(audio, pcm_rate=rate), "ogg"
+    rate = TTS_PCM_RATE
+    match = re.search(r"rate=(\d{4,6})", ctype)
+    if match:                 # Header nói rõ tần số mẫu thì tin header
+        rate = int(match.group(1))
 
-    try:
-        return to_ogg_opus(audio), "ogg"
-    except Exception as e:
-        if looks_like_mp3(audio):
-            logging.warning("Không đổi được sang ogg/opus (%s) -> gửi thẳng mp3", e)
-            return audio, "mp3"
-        raise
+    # Nhận diện file có tiêu đề bằng dấu hiệu CHẶT ('ID3'/'OggS'/'RIFF') hoặc Content-Type. Không dò khung mp3 trên PCM thô vì
+    # PCM bắt đầu bằng đoạn im lặng (0xFF 0xFF) sẽ bị nhầm thành mp3.
+    is_container = (audio[:3] == b"ID3" or audio[:4] in (b"OggS", b"RIFF")
+                    or any(key in ctype for key in ("mpeg", "ogg", "wav")))
+    if is_container:
+        # Đáng lẽ là PCM; nếu model lỡ trả mp3/ogg/wav thì giải mã về PCM để còn ghép được với các đoạn khác
+        logging.warning("TTS trả file có tiêu đề (%s) thay vì PCM -> giải mã bằng ffmpeg", ctype or "không rõ")
+        return to_pcm(audio, TTS_PCM_RATE), TTS_PCM_RATE
+    return audio, rate
 
 
-def text_to_voice(text):
-    """synthesize() có thử lại. Hết lượt thử vẫn lỗi thì ném lỗi cuối cùng."""
+def speech_with_retry(text):
+    """request_speech() có thử lại cho một đoạn. Hết lượt thử vẫn lỗi thì ném lỗi cuối cùng."""
     last_error = None
     for attempt in range(TTS_ATTEMPTS):
         try:
-            return synthesize(text)
+            return request_speech(text)
         except RateLimitError:
             raise   # Đang bị giới hạn: thử lại ngay chỉ phí lượt -> gửi chữ luôn
         except requests.HTTPError as e:
@@ -868,18 +1007,41 @@ def text_to_voice(text):
     raise last_error
 
 
+def text_to_voice(text):
+    """
+    Đọc cả bức thư: chia đoạn -> TTS từng đoạn -> ghép PCM (chèn quãng lặng giữa các đoạn) -> MỘT file ogg/opus.
+    Bất kỳ đoạn nào lỗi thì ném lỗi (deliver() sẽ gửi bản chữ cả thư, không gửi voice cụt).
+    """
+    chunks = split_for_tts(text)
+    if not chunks:
+        raise ValueError("Không có chữ để đọc")
+    parts, rate = [], None
+    for index, chunk in enumerate(chunks, 1):
+        pcm, chunk_rate = speech_with_retry(chunk)
+        if rate is None:
+            rate = chunk_rate
+        elif chunk_rate != rate:
+            pcm = to_pcm(pcm, rate, src_rate=chunk_rate)   # Hiếm: các đoạn khác tần số mẫu -> đưa về cùng tần số
+        if len(pcm) % 2:
+            pcm = pcm[:-1]   # Cắt byte lẻ MỖI đoạn để các mẫu 16-bit không bị lệch khi ghép
+        parts.append(pcm)
+        logging.info("Đã đọc xong đoạn %s/%s", index, len(chunks))
+    silence = b"\x00\x00" * int(rate * TTS_GAP_SECONDS)
+    return to_ogg_opus(silence.join(parts), rate)
+
+
 def deliver(chat_id, text):
     """
-    Gửi câu trả lời của Linh dưới dạng VOICE. Bất cứ bước nào của voice (TTS, tải lên Telegram) lỗi
-    thì tự gửi bản chữ để bot không bao giờ im lặng. Chỉ khi cả bản chữ cũng lỗi mới ném exception
-    (để vòng lặp chính thử lại tin này).
+    Gửi bức thư của Linh dưới dạng VOICE. Bất cứ bước nào của voice (TTS, ghép, tải lên Telegram) lỗi
+    thì tự gửi bản chữ (tách thành nhiều tin nếu dài) để bot không bao giờ im lặng. Chỉ khi cả bản chữ cũng lỗi
+    mới ném exception (để vòng lặp chính thử lại tin này).
     """
     spoken = clean_for_speech(text)
     if spoken:
         try:
             with ChatAction(chat_id, "record_voice"):
-                audio, kind = text_to_voice(spoken)
-            send_voice(chat_id, audio, kind)
+                audio = text_to_voice(spoken)
+            send_voice(chat_id, audio)
         except Exception as e:
             logging.error("Không gửi được voice (%s) -> gửi bản chữ thay thế", e)
         else:
@@ -894,13 +1056,13 @@ def deliver(chat_id, text):
 
 
 # ============================================================
-# NHẮN TRƯỚC CHỦ ĐỘNG (khi chủ nhân im lặng quá lâu)
+# THƯ CHỦ ĐỘNG (Linh tự viết trước khi chủ nhân im lặng quá lâu)
 # ============================================================
-timer = {"next_at": 0.0}   # Thời điểm sớm nhất Linh được phép nhắn trước
+timer = {"next_at": 0.0}   # Thời điểm sớm nhất Linh được phép tự viết thư trước
 
 
 def schedule_next(base):
-    """Hẹn giờ nhắn trước kế tiếp: ngẫu nhiên 2-3 giờ tính từ mốc base."""
+    """Hẹn giờ thư chủ động kế tiếp: ngẫu nhiên trong khoảng PROACTIVE_MIN_IDLE..PROACTIVE_MAX_IDLE giây tính từ mốc base."""
     timer["next_at"] = base + random.uniform(PROACTIVE_MIN_IDLE, PROACTIVE_MAX_IDLE)
 
 
@@ -928,7 +1090,7 @@ def in_quiet_hours(hour):
 
 
 def maybe_send_proactive():
-    """Gọi sau mỗi lần quét tin. Đến giờ thì Linh tự nhắn trước cho chủ nhân."""
+    """Gọi sau mỗi lần quét tin. Đến giờ thì Linh tự viết thư trước cho chủ nhân."""
     if not PROACTIVE_ENABLED:
         return
 
@@ -950,26 +1112,36 @@ def maybe_send_proactive():
         text = generate_proactive(history, idle_hours)
         deliver(CHAT_ID, text)
 
-        # Chỉ lưu tin của Linh (không lưu chỉ dẫn nội bộ)
+        # Chỉ lưu thư của Linh (không lưu chỉ dẫn nội bộ)
         history.append({"role": "assistant", "content": text})
         store["unanswered"] += 1
         store["last_event"] = now
         schedule_next(now)
         save_history(history)
-        logging.info("Đã nhắn trước (chưa trả lời: %s)", store["unanswered"])
+        logging.info("Đã gửi thư chủ động (chưa được hồi âm: %s)", store["unanswered"])
     except RateLimitError as e:
         # Bị giới hạn tốc độ: dời lượt nhắn trước, không "đốt" thêm yêu cầu free
-        logging.error("Nhắn trước bị giới hạn tốc độ, thử lại sau %s giây", max(e.wait, PROACTIVE_RETRY_DELAY))
+        logging.error("Thư chủ động bị giới hạn tốc độ, thử lại sau %s giây", max(e.wait, PROACTIVE_RETRY_DELAY))
         timer["next_at"] = time.time() + max(e.wait, PROACTIVE_RETRY_DELAY)
     except Exception as e:
         # Lỗi mạng / API: thử lại sau 1 phút, không làm sập vòng lặp
-        logging.error("Lỗi khi nhắn trước: %s", e)
+        logging.error("Lỗi khi gửi thư chủ động: %s", e)
         timer["next_at"] = time.time() + PROACTIVE_RETRY_DELAY
 
 
 # ============================================================
 # XỬ LÝ TỪNG TIN NHẮN
 # ============================================================
+def remember(history, user_text, reply, details):
+    """Lưu lượt trao đổi vào bộ nhớ SAU KHI thư đã gửi thành công (lưu bản chữ gốc, không phải bản đã lọc để đọc)."""
+    history.append({"role": "user", "content": user_text})
+    entry = {"role": "assistant", "content": reply}
+    if KEEP_REASONING and details:
+        entry["reasoning_details"] = details
+    history.append(entry)
+    save_history(history)
+
+
 def handle_update(update):
     """
     Trả về True  nếu đã xử lý xong (hoặc bỏ qua hợp lệ) -> được phép sang tin kế tiếp.
@@ -986,50 +1158,66 @@ def handle_update(update):
         logging.warning("Bỏ qua tin nhắn từ người lạ.")
         return True
 
-    # Chủ nhân vừa nhắn -> đặt lại đồng hồ "im lặng" của tính năng nhắn trước
+    # Chủ nhân vừa nhắn -> đặt lại đồng hồ "im lặng" của tính năng thư chủ động
     mark_user_activity()
 
     text = message.get("text")
     if not text:
-        send_message(chat_id, "Em chỉ đọc được tin nhắn chữ thôi anh ơi 😘")
+        send_message(chat_id, "Em chỉ đọc được thư chữ thôi anh nhé.")
         return True
 
-    command = text.strip().lower()
+    parts = text.strip().split(None, 1)
+    if not parts:
+        return True
+    head = parts[0].lower().split("@")[0]     # "/thu@ten_bot" vẫn là lệnh /thu
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
-    # Lệnh /start: chào mở đầu
-    if command.startswith("/start"):
-        deliver(chat_id, "Anh yêu~ em chờ anh nãy giờ đó 😘 *nhào vào lòng anh* Hôm nay của anh thế nào?")
+    # Lệnh /start: lời chào bằng giọng nói + gợi ý lệnh (bản chữ)
+    if head == "/start":
+        deliver(chat_id, WELCOME_SPOKEN)
+        try:
+            send_message(chat_id, HELP_TEXT)
+        except Exception as e:
+            logging.error("Không gửi được hướng dẫn lệnh: %s", e)   # Lời chào đã tới nơi; ném lỗi sẽ làm chào lại lần nữa
         push_state()
         return True
 
+    if head == "/help":
+        send_message(chat_id, HELP_TEXT)
+        return True
+
     # Lệnh /reset: xóa toàn bộ bộ nhớ trò chuyện
-    if command.startswith("/reset"):
+    if head == "/reset":
         save_history([])
-        send_message(chat_id, "Em quên hết rồi nè, mình bắt đầu lại từ đầu nhé anh 💕")
+        send_message(chat_id, "Em đã xếp hết những bức thư cũ vào ngăn kéo, mình bắt đầu một trang giấy mới nhé anh.")
+        return True
+
+    # Lệnh /thu [chủ đề]: xin một bức thư ngay
+    if head == "/thu":
+        history = load_history()
+        with ChatAction(chat_id, "typing"):
+            reply, details = generate_letter(history, arg)
+        deliver(chat_id, reply)
+        request_note = "Anh xin em một bức thư" + (" với chủ đề {}.".format(" ".join(arg.split())[:200]) if arg else ".")
+        remember(history, request_note, reply, details)
         return True
 
     history = load_history()                       # Đọc bộ nhớ
-    with ChatAction(chat_id, "typing"):            # Giữ "đang nhập..." trong lúc model suy nghĩ
+    with ChatAction(chat_id, "typing"):            # Giữ "đang nhập..." trong lúc model viết thư
         reply, details = ask_llm(text, history)    # Gọi AI (lỗi sẽ ném exception ra ngoài)
     deliver(chat_id, reply)                        # Đọc thành giọng nói rồi gửi (lỗi thì gửi chữ)
 
     # Chỉ lưu vào bộ nhớ SAU KHI đã gửi thành công -> không bao giờ lưu nửa vời
-    # (lưu bản chữ gốc, còn nguyên cử chỉ, chứ không phải bản đã lọc để đọc)
-    history.append({"role": "user", "content": text})
-    entry = {"role": "assistant", "content": reply}
-    if KEEP_REASONING and details:
-        entry["reasoning_details"] = details
-    history.append(entry)
-    save_history(history)
+    remember(history, text, reply, details)
     return True
 
 
 def notify_failure(error=None):
     """Báo nhẹ cho chủ nhân khi một tin nhắn lỗi liên tục và bị bỏ qua."""
     if isinstance(error, RateLimitError):
-        text = "Em đang bị nghẽn lượt nhắn nên chưa trả lời được, anh đợi vài phút rồi nhắn lại giúp em nhé 💋"
+        text = "Em đang bị nghẽn lượt viết nên chưa gửi được thư, anh đợi vài phút rồi nhắn lại giúp em nhé."
     else:
-        text = "Em bị chập chờn sóng một chút, anh nhắn lại giúp em nhé 💋"
+        text = "Đường truyền chập chờn nên thư của em chưa tới được anh, anh nhắn lại giúp em nhé."
     try:
         send_message(CHAT_ID, text)
     except Exception as e:
@@ -1039,7 +1227,7 @@ def notify_failure(error=None):
 def notify_busy():
     """Báo một lần khi phải chờ lâu (nhà cung cấp model quá tải) để chủ nhân không tưởng bot đứng hình."""
     try:
-        send_message(CHAT_ID, "Em đang hơi chậm một chút, anh đợi em xíu nhé 💕")
+        send_message(CHAT_ID, "Em đang viết dở bức thư, anh đợi em một lát nhé.")
     except Exception as e:
         logging.error("Không gửi được thông báo chờ: %s", e)
 
