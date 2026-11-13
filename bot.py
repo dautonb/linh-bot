@@ -165,7 +165,7 @@ TTS_ATTEMPTS = 2             # Số lần thử gọi TTS (cho MỖI đoạn) tr
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
 MEMORY_WINDOW = 10           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
-MAX_STORED_MESSAGES = 30     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
+MAX_STORED_MESSAGES = 300000     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
 RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
@@ -176,9 +176,9 @@ TELEGRAM_TEXT_LIMIT = 4000   # Giới hạn của Telegram là 4096 ký tự/tin
 # --- Tính năng Linh tự viết thư trước khi chủ nhân im lặng ---
 # Mỗi thư tốn từ 2 yêu cầu OpenRouter (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự) nên khoảng cách mặc định thưa hơn bot chat.
 PROACTIVE_ENABLED = env("PROACTIVE_ENABLED", "1") == "1"
-PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 3600
-PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 3600)
-MAX_UNANSWERED_PROACTIVE = 2     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
+PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 300
+PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 300)
+MAX_UNANSWERED_PROACTIVE = 20000     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
 QUIET_START_HOUR = int(env("QUIET_START_HOUR", "0"))     # Không gửi thư trước từ 0h...
 QUIET_END_HOUR = int(env("QUIET_END_HOUR", "7"))         # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
