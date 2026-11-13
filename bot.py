@@ -176,8 +176,8 @@ TELEGRAM_TEXT_LIMIT = 4000   # Giới hạn của Telegram là 4096 ký tự/tin
 # --- Tính năng Linh tự viết thư trước khi chủ nhân im lặng ---
 # Mỗi thư tốn từ 2 yêu cầu OpenRouter (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự) nên khoảng cách mặc định thưa hơn bot chat.
 PROACTIVE_ENABLED = env("PROACTIVE_ENABLED", "1") == "1"
-PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 100
-PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 100)
+PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 1800
+PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 3600)
 MAX_UNANSWERED_PROACTIVE = 20000     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
 QUIET_START_HOUR = int(env("QUIET_START_HOUR", "0"))     # Không gửi thư trước từ 0h...
 QUIET_END_HOUR = int(env("QUIET_END_HOUR", "7"))         # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
