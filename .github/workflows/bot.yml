@@ -1,4 +1,4 @@
-name: Linh Voice Bot (ERNIE)
+name: Linh Letters (ERNIE + HeyGen)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -9,9 +9,9 @@ on:
     - cron: "15 * * * *"
 
 # Chỉ cho phép 1 lượt chạy cùng lúc. Lượt mới xếp hàng chờ, KHÔNG hủy lượt đang chạy,
-# nhờ vậy 2 bot không bao giờ tranh nhau getUpdates (lỗi 409).
+# nhờ vậy không bao giờ có 2 tiến trình tranh nhau getUpdates (lỗi 409).
 concurrency:
-  group: linh-voice-bot-ernie
+  group: linh-letter-bot
   cancel-in-progress: false
 
 permissions:
@@ -25,13 +25,15 @@ jobs:
 
     env:
       # Toàn bộ khóa bí mật + nội dung nhân vật lấy từ Settings > Secrets (repo public không lộ gì)
+      # Bot này cần TOKEN TELEGRAM RIÊNG (tạo bot mới ở @BotFather) và nên đặt trong REPO RIÊNG (file bot.yml/bot.py trùng tên với bot khác).
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
       # MỘT khóa OpenRouter dùng cho cả chat (ERNIE) lẫn giọng nói (HeyGen).
-      # Bot này cần TOKEN TELEGRAM RIÊNG (tạo bot mới ở @BotFather): hai bot dùng chung một token sẽ tranh getUpdates (lỗi 409).
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+      # SYSTEM_PROMPT / STYLE_REMINDER / PROACTIVE_INSTRUCTION: để TRỐNG thì bot dùng bản mặc định (Linh viết thư trong sáng theo lối
+      # "Nàng Héloïse mới"). Nếu đặt SYSTEM_PROMPT riêng thì chỉ nên tả nhân vật; đừng dán lại prompt của bot khác nếu nó có nội dung gợi dục.
       SYSTEM_PROMPT: ${{ secrets.SYSTEM_PROMPT }}
       STYLE_REMINDER: ${{ secrets.STYLE_REMINDER }}
       PROACTIVE_INSTRUCTION: ${{ secrets.PROACTIVE_INSTRUCTION }}
@@ -41,12 +43,12 @@ jobs:
       # 20 yêu cầu/phút và 50 yêu cầu/ngày nếu chưa nạp đủ 10 credit). Đây là bản PREVIEW mới ra (10/11/2026) nên có thể
       # đông, đổi hoặc bị gỡ bất cứ lúc nào; trang OpenRouter cũng không nêu chính sách dữ liệu của model này.
       LLM_MODEL: "baidu/ernie-5.5-flash-preview:free"
-      # ĐANG TẮT SUY NGHĨ: bot gửi reasoning {"effort": "none"}. Trang model không nói ERNIE-5.5-Flash-Preview có tắt được hay không;
-      # nếu model từ chối (lỗi 400) thì bot tự gọi lại không có tham số reasoning (tốn thêm 1 yêu cầu ở tin đầu tiên) và nhớ cho
-      # các lượt sau, khi đó model chạy theo mặc định của nó. Muốn bật lại suy nghĩ (như mẫu OpenRouter): đổi thành "1".
+      # Viết thư không cần suy nghĩ dài nên TẮT: bot gửi reasoning {"effort": "none"}. Trang model không nói ERNIE-5.5-Flash-Preview có tắt
+      # được hay không; nếu model từ chối (lỗi 400) thì bot tự gọi lại không có tham số reasoning (tốn thêm 1 yêu cầu ở thư đầu tiên)
+      # và nhớ cho các lượt sau. Muốn bật suy nghĩ (như mẫu OpenRouter): đổi thành "1".
       LLM_REASONING: "0"
-      KEEP_REASONING: "0"         # "0" = không lưu/gửi lại reasoning_details (tắt suy nghĩ nên không có gì để giữ). "1" = giữ 2 câu gần nhất
-      LLM_MAX_TOKENS: "4096"      # Nếu model có suy nghĩ thì token suy nghĩ tính chung vào mức này
+      KEEP_REASONING: "0"         # "0" = không lưu/gửi lại reasoning_details. "1" = giữ 2 câu gần nhất
+      LLM_MAX_TOKENS: "4096"      # Thư ~500 từ tiếng Việt chiếm khoảng 1.500-2.500 token; nếu model có suy nghĩ thì token suy nghĩ tính chung vào mức này
       # Model dự phòng, cách nhau bằng dấu phẩy, thử khi ERNIE lỗi hoặc bị 429. Để trống = KHÔNG dự phòng (mặc định, vì
       # ERNIE preview không có bản trả phí cùng tên). Muốn dự phòng miễn phí: "inclusionai/ling-3.0-flash:free".
       # Model không có đuôi ":free" sẽ bị tính tiền và cần credit.
@@ -54,19 +56,27 @@ jobs:
 
       # --- Giọng nói ---
       # Theo ghi chú ở bản cũ, bản :free bị OpenRouter gỡ ngày 30/11/2026 -> sau ngày đó đổi thành "heygen/heygen-voice-1-turbo"
-      # (trả phí, khoảng $4/triệu ký tự, cần nạp credit). Muốn dùng Fish Audio: "fish-audio/s2.1-pro-free:free" (kèm đổi TTS_VOICE).
+      # (trả phí, khoảng $4/triệu ký tự, cần nạp credit).
       TTS_MODEL: "heygen/heygen-voice-1-turbo:free"
       # Giọng HeyGen: nadine, tabitha, bram, gareth, noelle, meredith, sabrina, lucian, weston, vincent.
-      # Giọng PHẢI khớp với model (Fish Audio dùng ID hex 32 ký tự, hoặc để trống = mặc định).
       TTS_VOICE: "sabrina"
       TTS_PCM_RATE: "44100"       # Tần số mẫu PCM của HeyGen. Nghe giọng nhanh/chậm/méo thì thử 24000 hoặc 22050
-      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (chỉ Fish Audio hỗ trợ, HeyGen bỏ qua). Để trống = không gửi
-      SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ ngay sau mỗi tin voice
+      TTS_CHUNK_CHARS: "4500"     # HeyGen cho tối đa 5.000 ký tự/lần; thư dài hơn mức này được đọc làm nhiều đoạn rồi ghép thành một voice
+      TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (HeyGen bỏ qua). Để trống = không gửi
+      SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ của thư ngay sau mỗi tin voice
       # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
-      # STATE_FILE: "state.json"             # Mặc định bot này dùng state_ernie.json (bộ nhớ riêng). Bỏ comment nếu muốn dùng tiếp state.json của bot cũ
+      # STATE_FILE: "state_letters.json"     # Mặc định đã là file riêng của bot thư; đổi nếu muốn dùng tên khác
+
+      # --- Thư tự viết trước khi anh im lặng ---
+      # Mỗi thư tốn 2-3 yêu cầu OpenRouter nên mặc định thưa: cách 5-8 giờ, không gửi từ 0h đến 7h sáng, tối đa 2 thư liên tiếp nếu chưa được hồi âm.
+      # PROACTIVE_ENABLED: "0"             # Bỏ comment để TẮT hẳn thư tự gửi
+      PROACTIVE_MIN_IDLE_HOURS: "5"
+      PROACTIVE_MAX_IDLE_HOURS: "8"
+      QUIET_START_HOUR: "0"
+      QUIET_END_HOUR: "7"
 
       RUN_SECONDS: "20400"        # Bot tự thoát sau 5h40m để còn kịp nối lượt kế tiếp
-      TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng
+      TZ_OFFSET_HOURS: "7"        # Múi giờ Việt Nam (UTC+7) để tính giờ yên lặng và buổi/ngày ghi trong thư
       PYTHONUNBUFFERED: "1"       # In log ra ngay, không bị giữ đệm
       GH_TOKEN: ${{ github.token }}
 
@@ -83,7 +93,7 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
+      # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg ghép các đoạn rồi đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
       # (thiếu ffmpeg thì bot gửi bản chữ). Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
       - name: Cài ffmpeg
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
