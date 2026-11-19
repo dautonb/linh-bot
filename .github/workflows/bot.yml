@@ -1,4 +1,4 @@
-name: Linh Letters (ERNIE + HeyGen)
+name: Linh Letters (ERNIE + HeyGen + Recraft)
 
 on:
   # Chạy thủ công lần đầu, và để mỗi lượt tự kích hoạt lượt kế tiếp
@@ -28,7 +28,7 @@ jobs:
       # Bot này cần TOKEN TELEGRAM RIÊNG (tạo bot mới ở @BotFather) và nên đặt trong REPO RIÊNG (file bot.yml/bot.py trùng tên với bot khác).
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
-      # MỘT khóa OpenRouter dùng cho cả chat (ERNIE) lẫn giọng nói (HeyGen).
+      # MỘT khóa OpenRouter dùng cho cả chat (ERNIE), giọng nói (HeyGen) lẫn ảnh minh họa (Recraft).
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       STATE_REPO: ${{ secrets.STATE_REPO }}
       STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
@@ -64,11 +64,23 @@ jobs:
       TTS_CHUNK_CHARS: "4500"     # HeyGen cho tối đa 5.000 ký tự/lần; thư dài hơn mức này được đọc làm nhiều đoạn rồi ghép thành một voice
       TTS_INSTRUCTIONS: ""        # Chỉ dẫn cách đọc (HeyGen bỏ qua). Để trống = không gửi
       SEND_TEXT_ALSO: "0"         # "1" = gửi thêm bản chữ của thư ngay sau mỗi tin voice
+
+      # --- Ảnh minh họa (gửi ngay sau tin voice) ---
+      # Recraft V4.1 Flash V2: chỉ tạo ảnh từ chữ, ~1,5 giây/ảnh. Trang OpenRouter ghi bản :free này "Going away November 28, 2026"
+      # (bản tiếng Đức ghi 27/11) -> sau ngày đó đổi IMAGE_MODEL thành "recraft/recraft-v4.1-flash" (trả phí, trang model ghi $0.007/ảnh, cần credit).
+      # Quên đổi cũng không sao: bot vẫn gửi voice bình thường, chỉ ghi log lỗi và tạm bỏ ảnh đến hết lượt chạy đó.
+      # Linh tự viết mô tả cảnh ở dòng cuối mỗi thư (không tốn thêm yêu cầu); mỗi ảnh tốn 1 yêu cầu OpenRouter.
+      IMAGE_ENABLED: "1"          # "0" = tắt hẳn ảnh, bot chạy như cũ
+      IMAGE_MODEL: "recraft/recraft-v4.1-flash-v2:free"
+      IMAGE_ASPECT_RATIO: "3:2"   # Tỉ lệ khung: 3:2 (ngang), 1:1 (vuông), 2:3, 4:3, 3:4, 4:5. Model từ chối thì bot tự bỏ tham số
+      IMAGE_PROMPT_FALLBACK: "1"  # "1" = ERNIE quên dòng mô tả cảnh thì nhờ thêm 1 yêu cầu chat ngắn để viết; "0" = quên thì bỏ ảnh lượt đó
+      # IMAGE_STYLE: "soft painterly illustration, warm natural light, no text"   # Bỏ comment để đổi phong cách (viết tiếng Anh); "-" = không gắn
+      # IMAGE_PROMPT_SUFFIX: "-"            # "-" = không nhờ ERNIE viết mô tả cảnh trong thư (luôn dùng yêu cầu chat riêng)
       # OPENROUTER_DATA_COLLECTION: "deny"   # Bỏ comment để chỉ dùng nhà cung cấp không thu thập dữ liệu (model free có thể báo 404)
       # STATE_FILE: "state_letters.json"     # Mặc định đã là file riêng của bot thư; đổi nếu muốn dùng tên khác
 
       # --- Thư tự viết trước khi anh im lặng ---
-      # Mỗi thư tốn 2-3 yêu cầu OpenRouter nên mặc định thưa: cách 5-8 giờ, không gửi từ 0h đến 7h sáng, tối đa 2 thư liên tiếp nếu chưa được hồi âm.
+      # Mỗi thư tốn 3-4 yêu cầu OpenRouter (chat + giọng nói + ảnh, thêm 1 nếu thư dài) nên mặc định thưa: cách 5-8 giờ, không gửi từ 0h đến 7h sáng, tối đa 2 thư liên tiếp nếu chưa được hồi âm.
       # PROACTIVE_ENABLED: "0"             # Bỏ comment để TẮT hẳn thư tự gửi
       PROACTIVE_MIN_IDLE_HOURS: "5"
       PROACTIVE_MAX_IDLE_HOURS: "8"
@@ -94,7 +106,7 @@ jobs:
         run: pip install -r requirements.txt
 
       # BẮT BUỘC với HeyGen: model chỉ trả PCM thô, bot dùng ffmpeg ghép các đoạn rồi đổi sang ogg/opus để Telegram phát được thành tin nhắn thoại
-      # (thiếu ffmpeg thì bot gửi bản chữ). Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
+      # (thiếu ffmpeg thì bot gửi bản chữ). ffmpeg cũng dùng để đổi ảnh webp sang jpeg nếu model trả webp. Máy đã có sẵn ffmpeg thì bước này bỏ qua ngay.
       - name: Cài ffmpeg
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
