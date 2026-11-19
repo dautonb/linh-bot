@@ -207,7 +207,7 @@ STATE_FILE = env("STATE_FILE", "state_letters.json")
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS (cho MỖI đoạn) trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 10           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
+MEMORY_WINDOW = 15           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
 MAX_STORED_MESSAGES = 300000     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
