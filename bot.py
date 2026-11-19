@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-bot.py - Linh Letter Bot (bản THƯ THOẠI: ERNIE + HeyGen) chạy trên GitHub Actions (Long Polling).
+bot.py - Linh Letter Bot (bản THƯ THOẠI + ẢNH: ERNIE + HeyGen + Recraft) chạy trên GitHub Actions (Long Polling).
 
 Linh viết cho anh những BỨC THƯ DÀI theo lối thư tín cổ điển (lấy cảm hứng từ "Nàng Héloïse mới" / Julie của Rousseau),
 trong sáng, KHÔNG có nội dung tình dục. Mỗi bức thư được đọc thành MỘT tin nhắn thoại dài:
 Baidu ERNIE-5.5-Flash-Preview viết thư -> HeyGen Voice Turbo đọc (PCM; thư dài được chia đoạn <= 4.500 ký tự,
 đọc từng đoạn rồi ghép lại) -> ffmpeg đổi sang ogg/opus -> Telegram sendVoice.
-CẢ HAI model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
+Sau tin voice, Linh gửi thêm MỘT ẢNH MINH HỌA cho bức thư: ERNIE viết thư kèm một dòng [IMAGE: ...] mô tả cảnh
+(bằng tiếng Anh) -> bot tách dòng đó ra -> Recraft V4.1 Flash V2 (qua OpenRouter) vẽ ảnh -> Telegram sendPhoto.
+Ảnh lỗi/model ảnh bị gỡ thì chỉ ghi log và bỏ qua ảnh, KHÔNG ảnh hưởng voice và không làm gửi lại thư.
+TẤT CẢ model đều gọi qua OpenRouter nên chỉ cần MỘT khóa OPENROUTER_API_KEY.
 TTS hoặc gửi voice lỗi thì tự gửi bản chữ (tách thành nhiều tin nếu dài), bot không bao giờ im lặng.
 
 Cách dùng: anh nhắn gì Linh cũng hồi âm bằng một bức thư; /thu [chủ đề] xin một bức thư ngay;
@@ -36,6 +39,7 @@ import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote_to_bytes
 
 import requests
 
@@ -101,6 +105,30 @@ OPENROUTER_REFERER = env("OPENROUTER_REFERER", "")             # URL site cho b�
 # không có tùy chọn này, đặt "deny" có thể khiến model free báo 404.
 OPENROUTER_DATA_COLLECTION = env("OPENROUTER_DATA_COLLECTION", "")
 
+# --- Ảnh minh họa (Recraft qua OpenRouter) ---
+# Sau mỗi bức thư (tin voice), Linh gửi thêm một ảnh minh họa. "0" = tắt hẳn tính năng ảnh (bot chạy như cũ).
+IMAGE_ENABLED = env("IMAGE_ENABLED", "1") == "1"
+# Theo trang model trên OpenRouter, bản ":free" này được ghi "Going away November 28, 2026" (ngày 27 trên bản tiếng Đức).
+# Sau đó đổi IMAGE_MODEL thành bản trả phí "recraft/recraft-v4.1-flash" (trang OpenRouter ghi $0.007/ảnh, cần credit).
+# Bản V2 chỉ tạo ảnh từ chữ (không nhận ảnh đầu vào, không có style) và xuất ảnh raster nên gửi Telegram được ngay.
+IMAGE_MODEL = env("IMAGE_MODEL", "recraft/recraft-v4.1-flash-v2:free")
+# Tỉ lệ khung ảnh (image_config.aspect_ratio). Mặc định 3:2 (ngang, hợp ảnh phong cảnh); để "1:1" nếu muốn vuông.
+# Model báo lỗi 400 vì tỉ lệ thì bot tự gọi lại không có tham số này và nhớ cho các lượt sau.
+IMAGE_ASPECT_RATIO = env("IMAGE_ASPECT_RATIO", "3:2")
+# Model chỉ xuất ảnh (như Recraft, Flux) dùng ["image"]; model xuất cả chữ lẫn ảnh (như Gemini) dùng "image,text".
+IMAGE_MODALITIES = [m.strip() for m in env("IMAGE_MODALITIES", "image").split(",") if m.strip()] or ["image"]
+# Phong cách gắn vào cuối mô tả cảnh do Linh viết (tiếng Anh). Đặt "-" để không gắn gì.
+DEFAULT_IMAGE_STYLE = (
+    "soft painterly illustration, warm natural light, gentle nostalgic romantic mood, "
+    "no text, no letters, no watermark"
+)
+IMAGE_STYLE = env("IMAGE_STYLE", DEFAULT_IMAGE_STYLE)
+IMAGE_READ_TIMEOUT = int(env("IMAGE_READ_TIMEOUT", "90"))     # Giây chờ ảnh (model Flash chỉ mất ~1,5 giây nhưng để dư)
+IMAGE_PROMPT_MAX_CHARS = 600                                  # Mô tả cảnh dài hơn mức này thì cắt (Recraft giới hạn độ dài prompt)
+# "1" = nếu ERNIE quên dòng [IMAGE: ...] thì gọi thêm 1 yêu cầu chat ngắn để nhờ viết mô tả cảnh (tốn thêm 1 yêu cầu free).
+# "0" = quên thì bỏ ảnh lượt đó.
+IMAGE_PROMPT_FALLBACK = env("IMAGE_PROMPT_FALLBACK", "1") == "1"
+
 # Nội dung nhân vật có thể đặt trong Secrets (SYSTEM_PROMPT). Để trống thì dùng bản mặc định bên dưới.
 # LƯU Ý: bản này chỉ viết thư trong sáng. Đừng dùng lại SYSTEM_PROMPT của bot khác nếu nó có nội dung gợi dục -
 # lời nhắc "Lưu ý viết thư" bên dưới luôn được nối thêm vào cuối và yêu cầu thư không có nội dung tình dục.
@@ -124,6 +152,18 @@ DEFAULT_LETTER_SUFFIX = (
     "Không dùng emoji, markdown, tiêu đề, gạch đầu dòng, và không viết cử chỉ trong dấu *; "
     "viết số và từ viết tắt thành dạng dễ đọc; câu vừa phải để nghe thành tiếng không bị hụt hơi.]"
 )
+# Nhờ ERNIE viết luôn mô tả cảnh cho ảnh minh họa ở dòng cuối thư -> không tốn thêm yêu cầu chat. Bot tách dòng này ra trước khi
+# đọc/gửi/lưu bộ nhớ. Luôn được nối vào SYSTEM_PROMPT khi IMAGE_ENABLED=1 (kể cả khi bạn dùng prompt riêng trong Secrets).
+# Muốn tắt: đặt IMAGE_PROMPT_SUFFIX = "-" (bot sẽ nhờ thêm 1 yêu cầu chat để viết mô tả cảnh nếu IMAGE_PROMPT_FALLBACK=1).
+DEFAULT_IMAGE_SUFFIX = (
+    "[Lưu ý ảnh minh họa: sau chữ ký Linh, thêm đúng MỘT dòng cuối cùng, tách riêng, theo dạng [IMAGE: ...] để vẽ ảnh minh họa cho bức thư. "
+    "Trong ngoặc viết MỘT câu mô tả cảnh bằng TIẾNG ANH (đây là ngoại lệ duy nhất cho quy tắc chỉ viết tiếng Việt), "
+    "khoảng 25 đến 50 từ, nêu cụ thể bối cảnh, mùa, ánh sáng, màu sắc và đồ vật của hình ảnh đẹp nhất trong thư "
+    "(thiên nhiên, khung cửa sổ, bàn viết, con đường, căn phòng...). "
+    "Chỉ tả cảnh vật và đồ vật, không có chữ, số hay logo trong ảnh; nếu có người thì chỉ là bóng dáng nhìn từ xa; "
+    "không có nội dung gợi dục. "
+    "Dòng [IMAGE: ...] không thuộc bức thư: nó sẽ bị tách ra trước khi đọc nên đừng nhắc tới nó trong thư.]"
+)
 DEFAULT_PROACTIVE_INSTRUCTION = (
     "[Tình huống: đã khoảng {hours} giờ anh chưa nhắn cho em. Hãy tự viết trước một bức thư mới gửi anh: "
     "kể điều em đã thấy, đã nghĩ hoặc đã nhớ trong ngày, và hỏi thăm anh. Nếu trước đó anh có kể chuyện gì "
@@ -142,12 +182,15 @@ HELP_TEXT = (
     "/thu - xin ngay một bức thư\n"
     "/thu <chủ đề> - xin thư theo một chủ đề (ví dụ: /thu mùa thu)\n"
     "/reset - xóa bộ nhớ, bắt đầu lại\n"
-    "Anh nhắn gì em cũng hồi âm bằng một bức thư thoại."
+    "Anh nhắn gì em cũng hồi âm bằng một bức thư thoại" + (", kèm một bức ảnh minh họa." if IMAGE_ENABLED else ".")
 )
 _letter_suffix = env("LETTER_PROMPT_SUFFIX", DEFAULT_LETTER_SUFFIX)
 SYSTEM_PROMPT = env("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 if _letter_suffix and _letter_suffix != "-":
     SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _letter_suffix
+_image_suffix = env("IMAGE_PROMPT_SUFFIX", DEFAULT_IMAGE_SUFFIX)
+if IMAGE_ENABLED and _image_suffix and _image_suffix != "-":
+    SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + _image_suffix
 STYLE_REMINDER = env("STYLE_REMINDER", "")      # Lời nhắc gắn vào cuối mỗi tin của chủ nhân (có thể để trống)
 PROACTIVE_INSTRUCTION = env("PROACTIVE_INSTRUCTION", DEFAULT_PROACTIVE_INSTRUCTION)
 
@@ -444,6 +487,30 @@ def send_voice(chat_id, audio):
         raise RuntimeError("Telegram từ chối sendVoice: {}".format(data))
 
 
+def send_photo(chat_id, image, mime="image/jpeg"):
+    """
+    Gửi ảnh (hiện như ảnh thường trong khung chat). File upload dạng multipart nên không dùng tg_call.
+    Telegram từ chối kích thước/định dạng ảnh (400) thì gửi lại dưới dạng tệp (sendDocument) để ảnh vẫn tới nơi.
+    """
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "jpg")
+    for method, field in (("sendPhoto", "photo"), ("sendDocument", "document")):
+        url = "https://api.telegram.org/bot{}/{}".format(TELEGRAM_BOT_TOKEN, method)
+        resp = session.post(
+            url,
+            data={"chat_id": chat_id},
+            files={field: ("anh_cua_linh.{}".format(ext), image, mime)},
+            timeout=(5, 60),
+        )
+        if resp.status_code == 400 and method == "sendPhoto":
+            logging.warning("Telegram từ chối sendPhoto (400) -> gửi ảnh dưới dạng tệp")
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError("Telegram từ chối {}: {}".format(method, data))
+        return
+
+
 def send_action(chat_id, action):
     """Hiện trạng thái 'đang nhập...' / 'đang ghi âm...'. Lỗi ở đây không quan trọng nên bỏ qua."""
     try:
@@ -514,7 +581,7 @@ HINT_429_UPSTREAM = (
 )
 HINT_429_ACCOUNT = (
     "chạm hạn mức của OpenRouter cho model free: 20 yêu cầu/phút, và 50 yêu cầu/ngày nếu tài khoản chưa nạp đủ 10 credit "
-    "(1000/ngày nếu đã nạp). Mỗi bức thư tốn từ 2 yêu cầu (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự)"
+    "(1000/ngày nếu đã nạp). Mỗi bức thư tốn từ 3 yêu cầu (1 chat + 1 giọng nói + 1 ảnh minh họa, thêm 1 nếu thư dài hơn 4.500 ký tự)"
 )
 
 
@@ -566,6 +633,11 @@ def report_openrouter_error(what, status, error, fallback_text=""):
         hint = OR_HINTS.get(status, "")
         if what == "TTS" and status == 404 and TTS_MODEL.endswith(":free"):
             hint += ". Nếu bản ':free' đã bị gỡ (ghi chú cũ nói là 30/11/2026) thì đổi TTS_MODEL thành bản không có ':free' (trả phí)"
+        if what == "image" and status in (404, 410):
+            hint = (hint + ". " if hint else "") + (
+                "Nếu bản ':free' đã bị gỡ (trang OpenRouter ghi ngừng 28/11/2026) thì đổi IMAGE_MODEL thành "
+                "'recraft/recraft-v4.1-flash' (trả phí, cần credit)"
+            )
     logging.error(
         "OpenRouter %s HTTP %s: %s%s%s",
         what,
@@ -608,7 +680,7 @@ def check_openrouter_response(resp, what):
 CJK_PATTERN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")  # chữ Trung/Nhật/Hàn
 REPEAT_CHAR_PATTERN = re.compile(r"(.)\1{14,}")   # 1 ký tự lặp liên tiếp từ 15 lần
 LEAK_MARKERS = (   # model lỡ đọc lại chỉ dẫn nội bộ
-    "[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói", "[Lưu ý viết thư", "[Bối cảnh thư",
+    "[Nhắc Linh", "[Tình huống", "[BỐI CẢNH", "[Lưu ý giọng nói", "[Lưu ý viết thư", "[Lưu ý ảnh minh họa", "[Bối cảnh thư",
 )
 VI_CHARS = set("àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ")
 THINK_PATTERN = re.compile(r"<think>.*?</think>", re.S | re.I)   # Phòng khi model để lộ phần suy nghĩ trong content
@@ -621,6 +693,32 @@ def strip_think(text):
     if idx != -1:
         text = text[:idx]
     return text.strip()
+
+
+IMAGE_TAG_PATTERN = re.compile(r"\[\s*IMAGE\s*:\s*(.*?)\s*\]", re.S | re.I)
+IMAGE_TAG_OPEN_PATTERN = re.compile(r"\[\s*IMAGE\s*:\s*(.*)$", re.S | re.I)   # Bị cắt cụt vì hết token: có "[IMAGE:" mà thiếu "]"
+
+
+def split_image_prompt(text):
+    """
+    Tách dòng [IMAGE: ...] (mô tả cảnh cho ảnh minh họa) ra khỏi bức thư.
+    Trả về (thư đã sạch, mô tả cảnh hoặc None). Mô tả quá ngắn / lẫn chữ Trung-Nhật-Hàn / lộ chỉ dẫn nội bộ thì coi như không có.
+    """
+    prompt = None
+    found = IMAGE_TAG_PATTERN.findall(text)
+    if found:
+        prompt = found[-1]                       # Có nhiều dòng thì lấy dòng cuối
+        text = IMAGE_TAG_PATTERN.sub("", text)
+    else:
+        match = IMAGE_TAG_OPEN_PATTERN.search(text)
+        if match:
+            prompt = match.group(1)
+            text = text[:match.start()]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    prompt = " ".join((prompt or "").split()).strip(" \"'`")
+    if len(prompt) < 15 or CJK_PATTERN.search(prompt) or any(marker in prompt for marker in LEAK_MARKERS):
+        prompt = None
+    return text, prompt
 
 
 def find_problem(text):
@@ -700,7 +798,7 @@ def reasoning_param(on):
 def call_llm(messages):
     """
     Gửi messages tới model chat (ERNIE-5.5-Flash-Preview) qua OpenRouter.
-    Trả về (câu trả lời, reasoning_details hoặc None).
+    Trả về (thư, reasoning_details hoặc None, mô tả cảnh cho ảnh minh họa hoặc None).
     Câu trả lời lỗi/vô nghĩa bị loại và thử lại 1 lần với nhiệt độ thấp hơn. Lỗi HTTP/timeout sẽ ném
     exception cho vòng lặp chính xử lý.
     """
@@ -760,6 +858,7 @@ def call_llm(messages):
         message = choice.get("message") or {}
         raw = message.get("content")
         content = strip_think(raw) if isinstance(raw, str) else ""
+        content, image_prompt = split_image_prompt(content)   # Tách dòng [IMAGE: ...] trước khi kiểm tra/đọc/lưu bức thư
         # Chỉ lấy reasoning_details khi đang bật suy nghĩ, hoặc khi không gửi tham số reasoning (model tự suy nghĩ theo mặc định)
         details = message.get("reasoning_details") if (reasoning_on or "reasoning" not in payload) else None
 
@@ -773,7 +872,7 @@ def call_llm(messages):
 
         problem = find_problem(content)
         if problem is None:
-            return content, (details if isinstance(details, list) and details else None)
+            return content, (details if isinstance(details, list) and details else None), image_prompt
 
         # Log công khai: chỉ ghi lý do và độ dài, KHÔNG ghi nội dung
         last_problem = problem
@@ -838,14 +937,14 @@ def with_reminder(text):
 
 
 def ask_llm(user_text, history):
-    """Hồi âm tin nhắn mới của chủ nhân bằng một bức thư. Trả về (thư, reasoning_details hoặc None)."""
+    """Hồi âm tin nhắn mới của chủ nhân bằng một bức thư. Trả về (thư, reasoning_details hoặc None, mô tả cảnh ảnh hoặc None)."""
     messages = build_context(history)
     messages.append({"role": "user", "content": with_reminder(user_text)})
     return call_llm(messages)
 
 
 def generate_letter(history, topic=""):
-    """Viết một bức thư theo yêu cầu (lệnh /thu), có thể kèm chủ đề. Trả về (thư, reasoning_details hoặc None)."""
+    """Viết một bức thư theo yêu cầu (lệnh /thu), có thể kèm chủ đề. Trả về (thư, reasoning_details hoặc None, mô tả cảnh ảnh hoặc None)."""
     topic = " ".join(topic.split())[:200]
     about = ' với chủ đề "{}"'.format(topic) if topic else ""
     messages = build_context(history)
@@ -854,12 +953,12 @@ def generate_letter(history, topic=""):
 
 
 def generate_proactive(history, idle_hours):
-    """Tạo bức thư Linh tự gửi trước, dựa trên bối cảnh trò chuyện gần đây."""
+    """Tạo bức thư Linh tự gửi trước, dựa trên bối cảnh trò chuyện gần đây. Trả về (thư, mô tả cảnh ảnh hoặc None)."""
     messages = build_context(history)
     instruction = PROACTIVE_INSTRUCTION.replace("{hours}", str(idle_hours))
     messages.append({"role": "user", "content": with_reminder(instruction)})
-    text, _ = call_llm(messages)   # Chỉ dẫn nội bộ không được lưu -> cũng không lưu reasoning_details của lượt này
-    return text
+    text, _, image_prompt = call_llm(messages)   # Chỉ dẫn nội bộ không được lưu -> cũng không lưu reasoning_details của lượt này
+    return text, image_prompt
 
 
 # ============================================================
@@ -1010,7 +1109,7 @@ def speech_with_retry(text):
 def text_to_voice(text):
     """
     Đọc cả bức thư: chia đoạn -> TTS từng đoạn -> ghép PCM (chèn quãng lặng giữa các đoạn) -> MỘT file ogg/opus.
-    Bất kỳ đoạn nào lỗi thì ném lỗi (deliver() sẽ gửi bản chữ cả thư, không gửi voice cụt).
+    Bất kỳ đoạn nào lỗi thì ném lỗi (deliver_letter() sẽ gửi bản chữ cả thư, không gửi voice cụt).
     """
     chunks = split_for_tts(text)
     if not chunks:
@@ -1030,7 +1129,7 @@ def text_to_voice(text):
     return to_ogg_opus(silence.join(parts), rate)
 
 
-def deliver(chat_id, text):
+def deliver_letter(chat_id, text):
     """
     Gửi bức thư của Linh dưới dạng VOICE. Bất cứ bước nào của voice (TTS, ghép, tải lên Telegram) lỗi
     thì tự gửi bản chữ (tách thành nhiều tin nếu dài) để bot không bao giờ im lặng. Chỉ khi cả bản chữ cũng lỗi
@@ -1053,6 +1152,223 @@ def deliver(chat_id, text):
                     logging.error("Không gửi được bản chữ kèm theo: %s", e)
             return
     send_message(chat_id, text)
+
+
+# ============================================================
+# ẢNH MINH HỌA: Recraft V4.1 Flash V2 qua OpenRouter -> Telegram sendPhoto
+# ============================================================
+# Học được trong lúc chạy. disabled: lỗi vĩnh viễn (sai khóa, hết credit, model bị gỡ) -> không gọi nữa đến hết lượt chạy
+# này để khỏi tốn yêu cầu; lượt chạy kế tiếp sẽ thử lại. no_config: model từ chối image_config -> các lượt sau không gửi nữa.
+image_state = {"disabled": False, "no_config": False}
+IMAGE_PERMANENT_ERRORS = (401, 402, 404, 410)
+
+
+class ImageUnavailableError(Exception):
+    """Model ảnh không dùng được lâu dài (sai khóa, hết credit, model bị gỡ)."""
+
+
+def fallback_image_prompt(letter):
+    """
+    ERNIE quên dòng [IMAGE: ...] -> nhờ thêm một yêu cầu chat NGẮN để viết mô tả cảnh bằng tiếng Anh.
+    Trả về mô tả cảnh, hoặc None nếu model trả lời không dùng được. Lỗi HTTP ném ra cho send_illustration xử lý.
+    """
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "You write short prompts for a text-to-image model. Reply with the prompt only."},
+            {"role": "user", "content": (
+                "Below is a Vietnamese letter. Write ONE English sentence of 25 to 50 words describing a single scene that "
+                "illustrates its mood: setting, season, light, colours and objects (nature, a window, a writing desk, a path, "
+                "a room). Describe scenery and objects only, with no text, numbers or logos in the picture; if a person appears "
+                "it is only a distant silhouette. Nothing sexual. Output only the sentence.\n\n" + letter[:3000]
+            )},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 400,
+        "stream": False,
+    }
+    reasoning = reasoning_param(False)   # Mô tả ngắn không cần suy nghĩ (nếu model không cho tắt thì tự bỏ tham số)
+    if reasoning is not None:
+        payload["reasoning"] = reasoning
+    prefs = provider_prefs()
+    if prefs:
+        payload["provider"] = prefs
+    data = post_chat(payload)
+    message = (data.get("choices") or [{}])[0].get("message") or {}
+    raw = message.get("content")
+    scene = " ".join((strip_think(raw) if isinstance(raw, str) else "").split()).strip(" \"'`")
+    if len(scene) < 15 or CJK_PATTERN.search(scene):
+        return None
+    return scene
+
+
+def build_image_prompt(scene):
+    """Mô tả cảnh (do Linh viết) + phong cách IMAGE_STYLE, gọn trong IMAGE_PROMPT_MAX_CHARS ký tự."""
+    scene = truncate_at_sentence(" ".join(scene.split()), IMAGE_PROMPT_MAX_CHARS)
+    if IMAGE_STYLE and IMAGE_STYLE != "-":
+        scene = scene.rstrip(" .,;") + ". " + IMAGE_STYLE
+    return scene
+
+
+def sniff_image(data):
+    """Nhận dạng định dạng ảnh theo vài byte đầu. Trả về mime, hoặc None nếu không phải ảnh quen thuộc."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    head = data[:300].lstrip().lower()
+    if head.startswith(b"<svg") or head.startswith(b"<?xml"):
+        return "image/svg+xml"
+    return None
+
+
+def to_jpeg(image):
+    """Đổi ảnh (thường là webp) sang JPEG bằng ffmpeg để Telegram chắc chắn nhận như ảnh thường."""
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("máy không có ffmpeg")
+    proc = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-frames:v", "1", "-pix_fmt", "yuvj420p",
+         "-q:v", "2", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
+        input=image, capture_output=True, timeout=60,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError("ffmpeg lỗi: {}".format(proc.stderr.decode("utf-8", "ignore")[:150]))
+    return proc.stdout
+
+
+def read_image_url(url):
+    """URL ảnh trong phản hồi: thường là data URL base64 (data:image/png;base64,...), hiếm khi là link http(s)."""
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        if ";base64" in header.lower():
+            return base64.b64decode(payload)
+        return unquote_to_bytes(payload)
+    if url.startswith(("http://", "https://")):
+        resp = requests.get(url, timeout=(5, 60))   # Không dùng session/header OpenRouter khi tải từ link ngoài
+        resp.raise_for_status()
+        return resp.content
+    raise ValueError("URL ảnh có dạng lạ")
+
+
+def extract_image(data):
+    """Lấy ảnh đầu tiên trong phản hồi: choices[0].message.images[].image_url.url (cách OpenRouter ghi trong tài liệu)."""
+    message = (data.get("choices") or [{}])[0].get("message") or {}
+    candidates = list(message.get("images") or [])
+    if isinstance(message.get("content"), list):   # Dự phòng: một số nhà cung cấp để ảnh trong mảng content
+        candidates += [part for part in message["content"] if isinstance(part, dict) and part.get("type") == "image_url"]
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        holder = item.get("image_url") or item.get("imageUrl") or {}
+        url = holder.get("url") if isinstance(holder, dict) else holder
+        if isinstance(url, str) and url:
+            return read_image_url(url)
+    raise ValueError("Phản hồi không có ảnh")
+
+
+def post_image(payload):
+    """Gọi OpenRouter chat/completions cho model ảnh. Ném lỗi nếu HTTP lỗi, hoặc HTTP 200 nhưng thân phản hồi là lỗi."""
+    resp = session.post(CHAT_URL, headers=or_headers(), json=payload, timeout=(5, IMAGE_READ_TIMEOUT))
+    check_openrouter_response(resp, "image")
+    data = resp.json()
+    error = data.get("error")
+    if isinstance(error, dict) and not data.get("choices"):
+        code = error.get("code")
+        status = code if isinstance(code, int) else 502
+        upstream = report_openrouter_error("image", status, error)
+        if status == 429:
+            raise RateLimitError(RATE_LIMIT_DELAY, upstream)
+        if status in IMAGE_PERMANENT_ERRORS:
+            raise ImageUnavailableError("OpenRouter ảnh lỗi (code {})".format(code))
+        raise RuntimeError("OpenRouter ảnh lỗi (code {})".format(code))
+    return data
+
+
+def request_image(prompt):
+    """Tạo ảnh từ mô tả. Trả về (bytes ảnh, mime). Model từ chối image_config (400) thì gọi lại không có và nhớ cho các lượt sau."""
+    payload = {
+        "model": IMAGE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": IMAGE_MODALITIES,
+        "stream": False,
+    }
+    if IMAGE_ASPECT_RATIO and not image_state["no_config"]:
+        payload["image_config"] = {"aspect_ratio": IMAGE_ASPECT_RATIO}
+    prefs = provider_prefs()
+    if prefs:
+        payload["provider"] = prefs
+    try:
+        data = post_image(payload)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status != 400 or "image_config" not in payload:
+            raise
+        logging.warning("image_config bị từ chối (tỉ lệ khung không hợp?) -> thử lại không có tham số này")
+        payload.pop("image_config")
+        data = post_image(payload)
+        image_state["no_config"] = True   # Chỉ ghi nhớ khi gọi lại không có tham số mà thành công
+    image = extract_image(data)
+    mime = sniff_image(image)
+    if mime == "image/svg+xml":
+        raise ValueError("Model trả ảnh vector SVG, Telegram không hiện được -> hãy dùng model ảnh raster")
+    if mime is None:
+        raise ValueError("Không nhận ra định dạng ảnh ({} byte)".format(len(image)))
+    return image, mime
+
+
+def send_illustration(chat_id, letter, image_prompt=None):
+    """
+    Tạo và gửi ảnh minh họa cho bức thư. KHÔNG BAO GIỜ ném lỗi ra ngoài: voice đã tới nơi rồi, mà ném lỗi sẽ làm vòng lặp
+    chính gửi lại cả bức thư. Ảnh lỗi chỉ ghi log (không ghi nội dung thư hay mô tả cảnh vì log Actions là công khai).
+    """
+    if not IMAGE_ENABLED or image_state["disabled"]:
+        return
+    try:
+        scene = image_prompt
+        if not scene and IMAGE_PROMPT_FALLBACK:
+            with ChatAction(chat_id, "upload_photo"):
+                scene = fallback_image_prompt(letter)
+        if not scene:
+            logging.warning("Không có mô tả cảnh cho ảnh minh họa -> bỏ ảnh lượt này")
+            return
+        with ChatAction(chat_id, "upload_photo"):
+            image, mime = request_image(build_image_prompt(scene))
+            if mime == "image/webp":
+                try:
+                    image, mime = to_jpeg(image), "image/jpeg"
+                except Exception as e:
+                    logging.warning("Không đổi được webp sang jpeg (%s) -> gửi nguyên bản", e)
+            send_photo(chat_id, image, mime)
+        logging.info("Đã gửi ảnh minh họa (%s, %s KB)", mime, len(image) // 1024)
+    except ImageUnavailableError as e:
+        image_state["disabled"] = True
+        logging.error("Model ảnh không dùng được (%s) -> tắt ảnh đến hết lượt chạy này, bot vẫn gửi voice bình thường", e)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in IMAGE_PERMANENT_ERRORS:
+            image_state["disabled"] = True
+            logging.error("Model ảnh không dùng được (HTTP %s) -> tắt ảnh đến hết lượt chạy này, bot vẫn gửi voice bình thường", status)
+        else:
+            logging.error("Không gửi được ảnh minh họa (HTTP %s)", status)
+    except RateLimitError as e:
+        logging.error("Ảnh minh họa bị giới hạn tốc độ -> bỏ ảnh lượt này (%s)", e)
+    except Exception as e:
+        logging.error("Không gửi được ảnh minh họa: %s", e)
+
+
+def deliver(chat_id, text, image_prompt=None, with_image=False):
+    """
+    Gửi bức thư: voice (hoặc chữ nếu voice lỗi) rồi, nếu with_image, thêm một ảnh minh họa.
+    Chỉ deliver_letter() mới có thể ném lỗi (khi cả voice lẫn chữ đều hỏng -> vòng lặp chính thử lại tin này);
+    bước ảnh chạy SAU khi thư đã tới nơi và không bao giờ ném lỗi.
+    """
+    deliver_letter(chat_id, text)
+    if with_image:
+        send_illustration(chat_id, text, image_prompt)
 
 
 # ============================================================
@@ -1109,8 +1425,8 @@ def maybe_send_proactive():
     idle_hours = max(1, round((now - (store["last_user"] or store["last_event"] or now)) / 3600))
     try:
         history = load_history()
-        text = generate_proactive(history, idle_hours)
-        deliver(CHAT_ID, text)
+        text, image_prompt = generate_proactive(history, idle_hours)
+        deliver(CHAT_ID, text, image_prompt, with_image=True)
 
         # Chỉ lưu thư của Linh (không lưu chỉ dẫn nội bộ)
         history.append({"role": "assistant", "content": text})
@@ -1196,16 +1512,16 @@ def handle_update(update):
     if head == "/thu":
         history = load_history()
         with ChatAction(chat_id, "typing"):
-            reply, details = generate_letter(history, arg)
-        deliver(chat_id, reply)
+            reply, details, image_prompt = generate_letter(history, arg)
+        deliver(chat_id, reply, image_prompt, with_image=True)
         request_note = "Anh xin em một bức thư" + (" với chủ đề {}.".format(" ".join(arg.split())[:200]) if arg else ".")
         remember(history, request_note, reply, details)
         return True
 
     history = load_history()                       # Đọc bộ nhớ
     with ChatAction(chat_id, "typing"):            # Giữ "đang nhập..." trong lúc model viết thư
-        reply, details = ask_llm(text, history)    # Gọi AI (lỗi sẽ ném exception ra ngoài)
-    deliver(chat_id, reply)                        # Đọc thành giọng nói rồi gửi (lỗi thì gửi chữ)
+        reply, details, image_prompt = ask_llm(text, history)   # Gọi AI (lỗi sẽ ném exception ra ngoài)
+    deliver(chat_id, reply, image_prompt, with_image=True)      # Đọc thành giọng nói rồi gửi (lỗi thì gửi chữ), sau đó gửi ảnh minh họa
 
     # Chỉ lưu vào bộ nhớ SAU KHI đã gửi thành công -> không bao giờ lưu nửa vời
     remember(history, text, reply, details)
@@ -1267,6 +1583,15 @@ def main():
         "LLM: %s (suy nghĩ: %s) | TTS: %s (%s), giọng '%s'",
         LLM_MODEL, "bật" if LLM_REASONING else "tắt", TTS_MODEL, TTS_FORMAT, TTS_VOICE or "mặc định",
     )
+    if IMAGE_ENABLED:
+        logging.info(
+            "Ảnh minh họa: %s (tỉ lệ %s, modalities %s)",
+            IMAGE_MODEL, IMAGE_ASPECT_RATIO or "mặc định", ",".join(IMAGE_MODALITIES),
+        )
+        if IMAGE_MODEL.endswith(":free"):
+            logging.info("Lưu ý: bản ':free' của model ảnh được OpenRouter ghi là ngừng vào 28/11/2026 -> sau đó đổi IMAGE_MODEL (xem bot.yml)")
+    else:
+        logging.info("Ảnh minh họa: TẮT")
     if LLM_FALLBACK_MODELS:
         logging.info("Model dự phòng: %s", ", ".join(LLM_FALLBACK_MODELS))
         for name in LLM_FALLBACK_MODELS:
