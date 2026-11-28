@@ -164,8 +164,8 @@ STATE_FILE = env("STATE_FILE", "state_letters.json")
 TTS_ATTEMPTS = 2             # Số lần thử gọi TTS (cho MỖI đoạn) trước khi chuyển sang gửi chữ
 TTS_RETRY_DELAY = 3          # Giây chờ giữa 2 lần thử
 
-MEMORY_WINDOW = 100           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
-MAX_STORED_MESSAGES = 30000     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
+MEMORY_WINDOW = 10           # Số tin gần nhất gửi kèm làm ngữ cảnh (mỗi thư dài ~3.500 ký tự nên giữ ít hơn bot chat)
+MAX_STORED_MESSAGES = 30     # Chỉ cần lưu hơn MEMORY_WINDOW một chút -> file bộ nhớ nhỏ (mỗi lần lưu là một commit)
 POLL_TIMEOUT = 20            # Long Polling: Telegram giữ kết nối tối đa 20s nếu chưa có tin mới
 RETRY_DELAY = 5              # Giây chờ khi lỗi mạng / lỗi API trước khi thử lại
 RATE_LIMIT_DELAY = 25        # Giây chờ cơ sở khi bị báo 429 (lần thử thứ n sẽ chờ n lần mức này, tối đa 60s)
@@ -176,9 +176,9 @@ TELEGRAM_TEXT_LIMIT = 4000   # Giới hạn của Telegram là 4096 ký tự/tin
 # --- Tính năng Linh tự viết thư trước khi chủ nhân im lặng ---
 # Mỗi thư tốn từ 2 yêu cầu OpenRouter (1 chat + 1 giọng nói, thêm 1 nếu thư dài hơn 4.500 ký tự) nên khoảng cách mặc định thưa hơn bot chat.
 PROACTIVE_ENABLED = env("PROACTIVE_ENABLED", "1") == "1"
-PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 300
-PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 300)
-MAX_UNANSWERED_PROACTIVE = 20000     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
+PROACTIVE_MIN_IDLE = float(env("PROACTIVE_MIN_IDLE_HOURS", "5")) * 3600
+PROACTIVE_MAX_IDLE = max(PROACTIVE_MIN_IDLE, float(env("PROACTIVE_MAX_IDLE_HOURS", "8")) * 3600)
+MAX_UNANSWERED_PROACTIVE = 2     # Tự viết trước tối đa 2 thư liên tiếp nếu chưa được hồi âm
 QUIET_START_HOUR = int(env("QUIET_START_HOUR", "0"))     # Không gửi thư trước từ 0h...
 QUIET_END_HOUR = int(env("QUIET_END_HOUR", "7"))         # ...đến 7h sáng (theo TZ_OFFSET_HOURS)
 PROACTIVE_RETRY_DELAY = 60
@@ -219,7 +219,8 @@ store = {
     "last_event": 0.0,   # Lần cuối có tương tác (chủ nhân nhắn HOẶC Linh nhắn trước)
     "unanswered": 0,     # Số tin nhắn trước liên tiếp chưa được trả lời
 }
-remote = {"sha": None, "dirty": False}  # sha của file trên repo; dirty = có thay đổi chưa lưu được
+# sha của file trên repo; dirty = có thay đổi chưa lưu được; rebuild = file bộ nhớ rỗng/hỏng -> cần lập file mới
+remote = {"sha": None, "dirty": False, "rebuild": False}
 
 
 def gh_headers():
@@ -234,22 +235,74 @@ def state_url():
     return "{}/repos/{}/contents/{}".format(GH_API, STATE_REPO, STATE_FILE)
 
 
+def gh_get_state(accept=None):
+    """GET file bộ nhớ. accept=None dùng media type thường (JSON + base64, chỉ đủ cho file <= 1 MB)."""
+    headers = gh_headers()
+    if accept:
+        headers = dict(headers, Accept=accept)
+    return session.get(state_url(), headers=headers, timeout=(5, 60))
+
+
 def pull_state():
-    """Tải file bộ nhớ (STATE_FILE) từ repo riêng tư. Trả về dict, hoặc None nếu file chưa tồn tại."""
-    resp = session.get(state_url(), headers=gh_headers(), timeout=(5, 20))
+    """
+    Tải file bộ nhớ (STATE_FILE) từ repo riêng tư. Trả về dict, hoặc None nếu file chưa có / rỗng / hỏng.
+    File rỗng hoặc không phải JSON -> bật cờ remote["rebuild"] để startup_sync lập ngay một file mới
+    (bản cũ vẫn nằm trong lịch sử commit của repo dữ liệu). File > 1 MB: API thường không trả nội dung nên tải bản raw.
+    Log công khai nên chỉ ghi kích thước và loại lỗi, không ghi nội dung file.
+    """
+    resp = gh_get_state()
     if resp.status_code == 404:
         remote["sha"] = None
         return None
-    resp.raise_for_status()
-    info = resp.json()
-    remote["sha"] = info["sha"]
-    return json.loads(base64.b64decode(info["content"]).decode("utf-8"))
+    info = None
+    if resp.status_code == 200:
+        try:
+            info = resp.json()
+        except ValueError:
+            info = None
+    if isinstance(info, dict) and info.get("encoding") == "base64" and "content" in info:
+        remote["sha"] = info.get("sha")
+        text = base64.b64decode(info["content"] or "").decode("utf-8", "replace")
+    else:
+        # File lớn hơn 1 MB (API trả 403 hoặc content rỗng/encoding "none") hoặc phản hồi lạ:
+        # lấy sha bằng media type "object", lấy nội dung bằng media type "raw" (hỗ trợ tới 100 MB).
+        logging.warning(
+            "Phản hồi thường không có nội dung file bộ nhớ (HTTP %s, %s) -> tải bản raw",
+            resp.status_code, resp.headers.get("Content-Type", "không rõ"),
+        )
+        meta = gh_get_state("application/vnd.github.object+json")
+        if meta.status_code == 404:
+            remote["sha"] = None
+            return None
+        meta.raise_for_status()
+        remote["sha"] = meta.json().get("sha")
+        raw = gh_get_state("application/vnd.github.raw+json")
+        raw.raise_for_status()
+        text = raw.content.decode("utf-8", "replace")
+        logging.info("Đã tải bản raw của file bộ nhớ (%s KB)", len(raw.content) // 1024)
+    if not text.strip():
+        logging.warning("File bộ nhớ rỗng -> sẽ lập file mới")
+        remote["rebuild"] = True
+        return None
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        logging.error("File bộ nhớ (%s KB) không phải JSON hợp lệ (%s) -> sẽ lập file mới", len(text) // 1024, e)
+        remote["rebuild"] = True
+        return None
 
 
 def refresh_sha():
-    """Lấy lại sha mới nhất của file (dùng khi PUT bị báo lệch phiên bản)."""
-    resp = session.get(state_url(), headers=gh_headers(), timeout=(5, 20))
-    remote["sha"] = resp.json().get("sha") if resp.status_code == 200 else None
+    """Lấy lại sha mới nhất của file (dùng khi PUT bị báo lệch phiên bản). File > 1 MB thì dùng media type "object"."""
+    for accept in (None, "application/vnd.github.object+json"):
+        resp = gh_get_state(accept)
+        if resp.status_code == 200:
+            try:
+                remote["sha"] = resp.json().get("sha")
+                return
+            except ValueError:
+                pass
+    remote["sha"] = None
 
 
 def push_state():
@@ -284,6 +337,9 @@ def push_state():
 def load_store():
     """Nạp bộ nhớ từ repo riêng tư vào store (chưa có file thì giữ giá trị mặc định)."""
     data = pull_state()
+    if data is not None and not isinstance(data, dict):
+        logging.error("File bộ nhớ có JSON hợp lệ nhưng sai cấu trúc -> sẽ lập file mới")
+        remote["rebuild"] = True
     if not isinstance(data, dict):
         return
     history = data.get("history", [])
@@ -299,7 +355,7 @@ def load_store():
             if m["role"] == "assistant" and isinstance(details, list) and details:
                 item["reasoning_details"] = details
             clean.append(item)
-        store["history"] = clean
+        store["history"] = clean[-MAX_STORED_MESSAGES:]   # File phình to thì thu gọn ngay trong bộ nhớ; lần lưu kế tiếp ghi bản gọn
     for key, cast in (("last_user", float), ("last_event", float), ("unanswered", int)):
         try:
             store[key] = cast(data.get(key, store[key]))
@@ -328,9 +384,40 @@ def save_history(history):
     push_state()
 
 
+def reset_store():
+    """Đưa bộ nhớ về trạng thái trống (như lần chạy đầu tiên)."""
+    store.update({"history": [], "last_user": 0.0, "last_event": 0.0, "unanswered": 0})
+
+
+def is_transient(error):
+    """Lỗi tạm thời (mất mạng, timeout, GitHub 5xx/429): KHÔNG lập file mới vì file cũ có thể vẫn ổn, chỉ là chưa đọc được."""
+    if isinstance(error, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        return error.response.status_code >= 500 or error.response.status_code == 429
+    return False
+
+
+def rebuild_state():
+    """
+    File bộ nhớ rỗng/hỏng/không đọc được -> lập file mới với bộ nhớ trống NGAY (ghi đè lên file cũ; bản cũ vẫn còn trong
+    lịch sử commit của repo dữ liệu). Ghi lỗi thì bot vẫn chạy, vòng lặp chính tự thử lưu lại (cờ dirty).
+    """
+    reset_store()
+    remote["rebuild"] = False
+    if push_state():
+        logging.warning("Đã lập file bộ nhớ mới: %s", STATE_FILE)
+    else:
+        logging.error("Chưa ghi được file bộ nhớ mới, bot sẽ tự thử lại")
+
+
 def startup_sync():
-    """Kiểm tra repo dữ liệu + tải bộ nhớ. Lỗi mạng thử tối đa 3 lần; sai cấu hình thì dừng ngay."""
+    """
+    Kiểm tra repo dữ liệu + tải bộ nhớ. Lỗi mạng thử tối đa 3 lần; sai cấu hình thì dừng ngay.
+    File bộ nhớ rỗng/hỏng, hoặc đọc lỗi không phải do mạng/GitHub tạm trục trặc -> tự lập file mới rồi chạy tiếp.
+    """
     repo_url = "{}/repos/{}".format(GH_API, STATE_REPO)
+    last_error = None
     for attempt in range(3):
         try:
             resp = session.get(repo_url, headers=gh_headers(), timeout=(5, 20))
@@ -341,12 +428,24 @@ def startup_sync():
                 )
                 return False
             resp.raise_for_status()
+            reset_store()           # Mỗi lần thử bắt đầu từ bộ nhớ trống để lần đọc dở dang trước không để lại dữ liệu lẫn
+            remote["rebuild"] = False
             load_store()
-            return True
+            last_error = None
+            break
         except Exception as e:
-            logging.error("Lỗi khi tải bộ nhớ (lần %s): %s", attempt + 1, e)
+            last_error = e
+            logging.error("Lỗi khi tải bộ nhớ (lần %s): %s: %s", attempt + 1, type(e).__name__, e)
             time.sleep(RETRY_DELAY)
-    return False
+    if last_error is not None:
+        if is_transient(last_error):
+            logging.error("Mạng hoặc GitHub đang trục trặc -> không đụng vào file bộ nhớ, thoát để lượt sau thử lại")
+            return False
+        logging.error("Không đọc được file bộ nhớ sau 3 lần thử -> lập file mới")
+        remote["rebuild"] = True
+    if remote["rebuild"]:
+        rebuild_state()
+    return True
 
 
 # ============================================================
